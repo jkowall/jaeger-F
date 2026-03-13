@@ -191,3 +191,31 @@ func TestFindLastFinishingChildSpan_MissingChild(t *testing.T) {
 	result := findLastFinishingChildSpan(spanMap, parentSpan, nil)
 	assert.Nil(t, result)
 }
+
+func TestComputeCriticalPath_FlatTraceLargeFanout(t *testing.T) {
+	traces := ptrace.NewTraces()
+	rs := traces.ResourceSpans().AppendEmpty()
+	ss := rs.ScopeSpans().AppendEmpty()
+
+	root := ss.Spans().AppendEmpty()
+	root.SetSpanID([8]byte{0, 0, 0, 0, 0, 0, 0, 1})
+	root.SetTraceID([16]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1})
+	root.SetStartTimestamp(pcommon.Timestamp(0))
+	root.SetEndTimestamp(pcommon.Timestamp(1000000 * 1000))
+
+	const fanout = 10000
+	for i := 0; i < fanout; i++ {
+		child := ss.Spans().AppendEmpty()
+		child.SetSpanID([8]byte{0, 0, 0, 0, byte(i >> 16), byte(i >> 8), byte(i), 2})
+		child.SetParentSpanID(root.SpanID())
+		child.SetTraceID(root.TraceID())
+		start := uint64(i + 1)
+		child.SetStartTimestamp(pcommon.Timestamp(start * 1000))
+		child.SetEndTimestamp(pcommon.Timestamp((start + 1) * 1000))
+	}
+
+	criticalPath, err := ComputeCriticalPathFromTraces(traces)
+	require.NoError(t, err)
+	// one section per child and one trailing root section
+	assert.Len(t, criticalPath, fanout+1)
+}
