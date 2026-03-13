@@ -5,6 +5,7 @@ package criticalpath
 
 import (
 	"errors"
+	"sort"
 
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/ptrace"
@@ -47,42 +48,41 @@ func computeCriticalPath(
 	criticalPath []Section,
 	returningChildStartTime *uint64,
 ) []Section {
-	currentSpan, ok := spanMap[spanID]
-	if !ok {
-		return criticalPath
-	}
+	selector := newChildSelector(spanMap)
 
-	lastFinishingChildSpan := findLastFinishingChildSpan(spanMap, currentSpan, returningChildStartTime)
+	currentSpanID := spanID
+	for {
+		currentSpan, ok := spanMap[currentSpanID]
+		if !ok {
+			return criticalPath
+		}
 
-	var spanCriticalSection Section
+		lastFinishingChildSpan := selector.findLastFinishingChild(currentSpan, returningChildStartTime)
 
-	if lastFinishingChildSpan != nil {
-		// There is a last finishing child
 		endTime := currentSpan.StartTime + currentSpan.Duration
 		if returningChildStartTime != nil {
 			endTime = *returningChildStartTime
 		}
 
-		spanCriticalSection = Section{
-			SpanID:       currentSpan.SpanID.String(),
-			SectionStart: lastFinishingChildSpan.StartTime + lastFinishingChildSpan.Duration,
-			SectionEnd:   endTime,
+		if lastFinishingChildSpan != nil {
+			spanCriticalSection := Section{
+				SpanID:       currentSpan.SpanID.String(),
+				SectionStart: lastFinishingChildSpan.StartTime + lastFinishingChildSpan.Duration,
+				SectionEnd:   endTime,
+			}
+
+			if spanCriticalSection.SectionStart != spanCriticalSection.SectionEnd {
+				criticalPath = append(criticalPath, spanCriticalSection)
+			}
+
+			// Now focus shifts to the lastFinishingChildSpan of current span.
+			currentSpanID = lastFinishingChildSpan.SpanID
+			returningChildStartTime = nil
+			continue
 		}
 
-		if spanCriticalSection.SectionStart != spanCriticalSection.SectionEnd {
-			criticalPath = append(criticalPath, spanCriticalSection)
-		}
-
-		// Now focus shifts to the lastFinishingChildSpan of current span
-		criticalPath = computeCriticalPath(spanMap, lastFinishingChildSpan.SpanID, criticalPath, nil)
-	} else {
-		// If there is no last finishing child then total section up to startTime of span is on critical path
-		endTime := currentSpan.StartTime + currentSpan.Duration
-		if returningChildStartTime != nil {
-			endTime = *returningChildStartTime
-		}
-
-		spanCriticalSection = Section{
+		// If there is no last finishing child then total section up to startTime of span is on critical path.
+		spanCriticalSection := Section{
 			SpanID:       currentSpan.SpanID.String(),
 			SectionStart: currentSpan.StartTime,
 			SectionEnd:   endTime,
@@ -92,16 +92,80 @@ func computeCriticalPath(
 			criticalPath = append(criticalPath, spanCriticalSection)
 		}
 
-		// Now as there are no LFCs focus shifts to parent span from startTime of span
-		// return from recursion and walk backwards to one level depth to parent span
-		// provide span's startTime as returningChildStartTime
-		if len(currentSpan.References) > 0 {
-			parentSpanID := currentSpan.References[0].SpanID
-			criticalPath = computeCriticalPath(spanMap, parentSpanID, criticalPath, &currentSpan.StartTime)
+		// Now as there are no LFCs focus shifts to parent span from startTime of span.
+		if len(currentSpan.References) == 0 {
+			return criticalPath
 		}
+
+		parentSpanID := currentSpan.References[0].SpanID
+		returningChildStartTime = &currentSpan.StartTime
+		currentSpanID = parentSpanID
+	}
+}
+
+type childSelector struct {
+	spanMap map[pcommon.SpanID]CPSpan
+	state   map[pcommon.SpanID]childSelectorState
+}
+
+type childSelectorState struct {
+	children []CPSpan
+	nextIdx  int
+}
+
+func newChildSelector(spanMap map[pcommon.SpanID]CPSpan) *childSelector {
+	return &childSelector{
+		spanMap: spanMap,
+		state:   make(map[pcommon.SpanID]childSelectorState),
+	}
+}
+
+func (s *childSelector) findLastFinishingChild(currentSpan CPSpan, returningChildStartTime *uint64) *CPSpan {
+	state, ok := s.state[currentSpan.SpanID]
+	if !ok {
+		state = childSelectorState{children: sortedChildrenByEndTimeDesc(currentSpan, s.spanMap)}
 	}
 
-	return criticalPath
+	for state.nextIdx < len(state.children) {
+		candidate := state.children[state.nextIdx]
+		candidateEnd := candidate.StartTime + candidate.Duration
+
+		if returningChildStartTime != nil && candidateEnd >= *returningChildStartTime {
+			state.nextIdx++
+			continue
+		}
+
+		state.nextIdx++
+		s.state[currentSpan.SpanID] = state
+		child := candidate
+		return &child
+	}
+
+	s.state[currentSpan.SpanID] = state
+	return nil
+}
+
+func sortedChildrenByEndTimeDesc(currentSpan CPSpan, spanMap map[pcommon.SpanID]CPSpan) []CPSpan {
+	children := make([]CPSpan, 0, len(currentSpan.ChildSpanIDs))
+
+	for _, childID := range currentSpan.ChildSpanIDs {
+		childSpan, ok := spanMap[childID]
+		if !ok {
+			continue
+		}
+		children = append(children, childSpan)
+	}
+
+	sort.Slice(children, func(i, j int) bool {
+		leftEndTime := children[i].StartTime + children[i].Duration
+		rightEndTime := children[j].StartTime + children[j].Duration
+		if leftEndTime != rightEndTime {
+			return leftEndTime > rightEndTime
+		}
+		return children[i].StartTime > children[j].StartTime
+	})
+
+	return children
 }
 
 // ComputeCriticalPathFromTraces computes the critical path for a given trace
