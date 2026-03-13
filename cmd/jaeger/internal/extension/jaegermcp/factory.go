@@ -48,6 +48,7 @@ func createDefaultConfig() component.Config {
 		ServerVersion:            ver,
 		MaxSpanDetailsPerRequest: 20,
 		MaxSearchResults:         100,
+		CORSAllowedOrigins:       nil,
 	}
 }
 

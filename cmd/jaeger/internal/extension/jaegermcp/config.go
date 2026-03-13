@@ -25,6 +25,10 @@ type Config struct {
 
 	// MaxSearchResults limits the number of trace search results.
 	MaxSearchResults int `mapstructure:"max_search_results" valid:"range(1|1000)"`
+
+	// CORSAllowedOrigins controls which browser origins are allowed to call MCP endpoints.
+	// Empty means CORS is disabled.
+	CORSAllowedOrigins []string `mapstructure:"cors_allowed_origins"`
 }
 
 // Validate checks if the configuration is valid.

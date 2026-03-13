@@ -101,8 +101,13 @@ func (s *server) Start(ctx context.Context, host component.Host) error {
 		w.Write([]byte("MCP server is running"))
 	})
 
+	handler := http.Handler(mux)
+	if len(s.config.CORSAllowedOrigins) > 0 {
+		handler = corsMiddleware(mux, s.config.CORSAllowedOrigins)
+	}
+
 	s.httpServer = &http.Server{
-		Handler:           corsMiddleware(mux),
+		Handler:           handler,
 		ReadHeaderTimeout: 30 * time.Second,
 	}
 
@@ -212,19 +217,26 @@ func (s *server) healthTool(
 	}, nil
 }
 
-// corsMiddleware wraps an http.Handler to add CORS headers.
-// This is required for browser-based MCP clients like the MCP Inspector.
-func corsMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Accept, Mcp-Session-Id, Mcp-Protocol-Version, Last-Event-ID")
-		w.Header().Set("Access-Control-Expose-Headers", "Mcp-Session-Id")
+// corsMiddleware wraps an http.Handler to add CORS headers for configured origins.
+func corsMiddleware(next http.Handler, allowedOrigins []string) http.Handler {
+	allowed := make(map[string]struct{}, len(allowedOrigins))
+	for _, origin := range allowedOrigins {
+		allowed[origin] = struct{}{}
+	}
 
-		// Handle preflight requests
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
-			return
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		if _, ok := allowed[origin]; ok {
+			w.Header().Set("Vary", "Origin")
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Accept, Mcp-Session-Id, Mcp-Protocol-Version, Last-Event-ID")
+			w.Header().Set("Access-Control-Expose-Headers", "Mcp-Session-Id")
+
+			if r.Method == http.MethodOptions {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
 		}
 
 		next.ServeHTTP(w, r)

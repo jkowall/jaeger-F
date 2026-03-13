@@ -704,8 +704,9 @@ func TestCORSPreflight(t *testing.T) {
 				Transport: confignet.TransportTypeTCP,
 			},
 		},
-		ServerName:    "jaeger-test",
-		ServerVersion: "1.0.0",
+		ServerName:         "jaeger-test",
+		ServerVersion:      "1.0.0",
+		CORSAllowedOrigins: []string{"http://localhost:3000"},
 	}
 
 	server := newServer(config, componenttest.NewNopTelemetrySettings())
@@ -727,6 +728,41 @@ func TestCORSPreflight(t *testing.T) {
 	defer resp.Body.Close()
 
 	assert.Equal(t, http.StatusNoContent, resp.StatusCode)
-	assert.Equal(t, "*", resp.Header.Get("Access-Control-Allow-Origin"))
+	assert.Equal(t, "http://localhost:3000", resp.Header.Get("Access-Control-Allow-Origin"))
 	assert.Equal(t, "GET, POST, DELETE, OPTIONS", resp.Header.Get("Access-Control-Allow-Methods"))
+}
+
+func TestCORSPreflightDisallowedOrigin(t *testing.T) {
+	config := &Config{
+		HTTP: confighttp.ServerConfig{
+			NetAddr: confignet.AddrConfig{
+				Endpoint:  "localhost:0",
+				Transport: confignet.TransportTypeTCP,
+			},
+		},
+		ServerName:         "jaeger-test",
+		ServerVersion:      "1.0.0",
+		CORSAllowedOrigins: []string{"http://localhost:3000"},
+	}
+
+	server := newServer(config, componenttest.NewNopTelemetrySettings())
+	host := newMockHost()
+	err := server.Start(context.Background(), host)
+	require.NoError(t, err)
+	defer server.Shutdown(context.Background())
+
+	addr := server.listener.Addr().String()
+	url := fmt.Sprintf("http://%s/mcp", addr)
+
+	req, err := http.NewRequest(http.MethodOptions, url, http.NoBody)
+	require.NoError(t, err)
+	req.Header.Set("Origin", "http://evil.example")
+	req.Header.Set("Access-Control-Request-Method", "POST")
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.NotEqual(t, http.StatusNoContent, resp.StatusCode)
+	assert.Empty(t, resp.Header.Get("Access-Control-Allow-Origin"))
 }
