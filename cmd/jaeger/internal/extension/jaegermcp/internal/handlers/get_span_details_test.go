@@ -166,7 +166,7 @@ func TestGetSpanDetailsHandler_Handle_FiltersBySpanIDs(t *testing.T) {
 }
 
 func TestGetSpanDetailsHandler_Handle_MissingTraceID(t *testing.T) {
-	handler := NewGetSpanDetailsHandler(nil)
+	handler := NewGetSpanDetailsHandler(nil, 20)
 
 	input := types.GetSpanDetailsInput{
 		SpanIDs: []string{spanIDToHex("span001")},
@@ -179,7 +179,7 @@ func TestGetSpanDetailsHandler_Handle_MissingTraceID(t *testing.T) {
 }
 
 func TestGetSpanDetailsHandler_Handle_MissingSpanIDs(t *testing.T) {
-	handler := NewGetSpanDetailsHandler(nil)
+	handler := NewGetSpanDetailsHandler(nil, 20)
 
 	input := types.GetSpanDetailsInput{
 		TraceID: testTraceID,
@@ -192,8 +192,22 @@ func TestGetSpanDetailsHandler_Handle_MissingSpanIDs(t *testing.T) {
 	assert.Contains(t, err.Error(), "span_ids is required")
 }
 
+func TestGetSpanDetailsHandler_Handle_TooManySpanIDs(t *testing.T) {
+	handler := NewGetSpanDetailsHandler(nil, 2)
+
+	input := types.GetSpanDetailsInput{
+		TraceID: testTraceID,
+		SpanIDs: []string{spanIDToHex("span001"), spanIDToHex("span002"), spanIDToHex("span003")},
+	}
+
+	_, _, err := handler(context.Background(), &mcp.CallToolRequest{}, input)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "span_ids must not exceed 2 items")
+}
+
 func TestGetSpanDetailsHandler_Handle_InvalidTraceID(t *testing.T) {
-	handler := NewGetSpanDetailsHandler(nil)
+	handler := NewGetSpanDetailsHandler(nil, 20)
 
 	input := types.GetSpanDetailsInput{
 		TraceID: "invalid-trace-id",
