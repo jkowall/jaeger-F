@@ -71,6 +71,46 @@ func TestClientFlags(t *testing.T) {
 	}
 }
 
+func TestServerFlagsConfig_AddFlags(t *testing.T) {
+	flags := &flag.FlagSet{}
+	cfg := ServerFlagsConfig{Prefix: "server"}
+	cfg.AddFlags(flags)
+
+	expected := []string{
+		"server.tls.enabled",
+		"server.tls.cert",
+		"server.tls.key",
+		"server.tls.client-ca",
+		"server.tls.cipher-suites",
+		"server.tls.min-version",
+		"server.tls.max-version",
+		"server.tls.reload-interval",
+	}
+
+	for _, name := range expected {
+		assert.NotNil(t, flags.Lookup(name), "Flag %s should be registered", name)
+	}
+}
+
+func TestClientFlagsConfig_AddFlags(t *testing.T) {
+	flags := &flag.FlagSet{}
+	cfg := ClientFlagsConfig{Prefix: "client"}
+	cfg.AddFlags(flags)
+
+	expected := []string{
+		"client.tls.enabled",
+		"client.tls.ca",
+		"client.tls.cert",
+		"client.tls.key",
+		"client.tls.server-name",
+		"client.tls.skip-host-verify",
+	}
+
+	for _, name := range expected {
+		assert.NotNil(t, flags.Lookup(name), "Flag %s should be registered", name)
+	}
+}
+
 func TestServerFlags(t *testing.T) {
 	cmdLine := []string{
 		"##placeholder##", // replaced in each test below
