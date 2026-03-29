@@ -113,26 +113,26 @@ func (i *IndicesClient) indexDeleteRequest(concatIndices string) error {
 
 // DeleteIndices deletes specified set of indices.
 func (i *IndicesClient) DeleteIndices(indices []Index) error {
-	concatIndices := ""
+	var builder strings.Builder
 	for j, index := range indices {
 		// verify the length of the concatIndices
 		// An HTTP line is should not be larger than 4096 bytes
 		// a line contains other than concatIndices data in the request, ie: master_timeout
 		// for a safer side check the line length should not exceed 4000
-		if (len(concatIndices) + len(index.Index)) > 4000 {
-			err := i.indexDeleteRequest(concatIndices)
+		if (builder.Len() + len(index.Index)) > 4000 {
+			err := i.indexDeleteRequest(builder.String())
 			if err != nil {
 				return err
 			}
-			concatIndices = ""
+			builder.Reset()
 		}
 
-		concatIndices += index.Index
-		concatIndices += ","
+		builder.WriteString(index.Index)
+		builder.WriteString(",")
 
 		// if it is last index, delete request should be executed
 		if j == len(indices)-1 {
-			return i.indexDeleteRequest(concatIndices)
+			return i.indexDeleteRequest(builder.String())
 		}
 	}
 	return nil
