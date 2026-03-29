@@ -18,7 +18,7 @@ type CacheStore struct {
 	// Given the small amount of data these will store, we use the same structure as the memory store
 	cacheLock  sync.Mutex // write heavy - Mutex is faster than RWMutex for writes
 	services   map[string]uint64
-	operations map[string]map[string]uint64
+	operations map[string]map[spanstore.Operation]uint64
 
 	store *badger.DB
 	ttl   time.Duration
@@ -28,7 +28,7 @@ type CacheStore struct {
 func NewCacheStore(db *badger.DB, ttl time.Duration) *CacheStore {
 	cs := &CacheStore{
 		services:   make(map[string]uint64),
-		operations: make(map[string]map[string]uint64),
+		operations: make(map[string]map[spanstore.Operation]uint64),
 		ttl:        ttl,
 		store:      db,
 	}
@@ -48,35 +48,36 @@ func (c *CacheStore) AddService(service string, keyTTL uint64) {
 }
 
 // AddOperation adds the cache with operation names with most updated expiration time
-func (c *CacheStore) AddOperation(service, operation string, keyTTL uint64) {
+func (c *CacheStore) AddOperation(service, operation, spanKind string, keyTTL uint64) {
 	c.cacheLock.Lock()
 	defer c.cacheLock.Unlock()
 	if _, found := c.operations[service]; !found {
-		c.operations[service] = make(map[string]uint64)
+		c.operations[service] = make(map[spanstore.Operation]uint64)
 	}
-	if v, found := c.operations[service][operation]; found {
+	op := spanstore.Operation{Name: operation, SpanKind: spanKind}
+	if v, found := c.operations[service][op]; found {
 		if v > keyTTL {
 			return
 		}
 	}
-	c.operations[service][operation] = keyTTL
+	c.operations[service][op] = keyTTL
 }
 
 // Update caches the results of service and service + operation indexes and maintains their TTL
-func (c *CacheStore) Update(service, operation string, expireTime uint64) {
+func (c *CacheStore) Update(service, operation, spanKind string, expireTime uint64) {
 	c.cacheLock.Lock()
 
 	c.services[service] = expireTime
 	if _, ok := c.operations[service]; !ok {
-		c.operations[service] = make(map[string]uint64)
+		c.operations[service] = make(map[spanstore.Operation]uint64)
 	}
-	c.operations[service][operation] = expireTime
+	op := spanstore.Operation{Name: operation, SpanKind: spanKind}
+	c.operations[service][op] = expireTime
 	c.cacheLock.Unlock()
 }
 
 // GetOperations returns all operations for a specific service & spanKind traced by Jaeger
-func (c *CacheStore) GetOperations(service string) ([]spanstore.Operation, error) {
-	operations := make([]string, 0, len(c.services))
+func (c *CacheStore) GetOperations(service, spanKind string) ([]spanstore.Operation, error) {
 	//nolint:gosec // G115
 	t := uint64(time.Now().Unix())
 	c.cacheLock.Lock()
@@ -89,26 +90,29 @@ func (c *CacheStore) GetOperations(service string) ([]spanstore.Operation, error
 			delete(c.operations, service)
 			return []spanstore.Operation{}, nil // empty slice rather than nil
 		}
-		for o, e := range c.operations[service] {
+
+		result := make([]spanstore.Operation, 0, len(c.operations[service]))
+		for op, e := range c.operations[service] {
 			if e > t {
-				operations = append(operations, o)
+				if spanKind == "" || spanKind == op.SpanKind {
+					result = append(result, op)
+				}
 			} else {
-				delete(c.operations[service], o)
+				delete(c.operations[service], op)
 			}
 		}
-	}
 
-	sort.Strings(operations)
-
-	// TODO: https://github.com/jaegertracing/jaeger/issues/1922
-	// 	- return the operations with actual spanKind
-	result := make([]spanstore.Operation, 0, len(operations))
-	for _, op := range operations {
-		result = append(result, spanstore.Operation{
-			Name: op,
+		sort.Slice(result, func(i, j int) bool {
+			if result[i].Name != result[j].Name {
+				return result[i].Name < result[j].Name
+			}
+			return result[i].SpanKind < result[j].SpanKind
 		})
+
+		return result, nil
 	}
-	return result, nil
+
+	return []spanstore.Operation{}, nil
 }
 
 // GetServices returns all services traced by Jaeger

@@ -17,10 +17,6 @@ func TestBadgerStorage(t *testing.T) {
 		PropagateEnvVars: []string{"BADGER_METRICS_UPDATE_INTERVAL"},
 		StorageIntegration: integration.StorageIntegration{
 			CleanUp: purge,
-
-			// TODO: remove this once badger supports returning spanKind from GetOperations
-			// Cf https://github.com/jaegertracing/jaeger/issues/1922
-			GetOperationsMissingSpanKind: true,
 		},
 	}
 	s.e2eInitialize(t, "badger")

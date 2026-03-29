@@ -67,10 +67,11 @@ func (w *SpanWriter) WriteSpan(_ context.Context, span *model.Span) error {
 		return err
 	}
 
+	kind, _ := span.GetSpanKind()
 	entriesToStore = append(entriesToStore,
 		trace,
 		w.createBadgerEntry(createIndexKey(serviceNameIndexKey, []byte(span.Process.ServiceName), startTime, span.TraceID), nil, expireTime),
-		w.createBadgerEntry(createIndexKey(operationNameIndexKey, []byte(span.Process.ServiceName+span.OperationName), startTime, span.TraceID), nil, expireTime),
+		w.createBadgerEntry(createIndexKey(operationNameIndexKey, []byte(span.Process.ServiceName+span.OperationName), startTime, span.TraceID), []byte(kind), expireTime),
 	)
 
 	// It doesn't matter if we overwrite Duration index keys, everything is read at Trace level in any case
@@ -111,7 +112,7 @@ func (w *SpanWriter) WriteSpan(_ context.Context, span *model.Span) error {
 	})
 
 	// Do cache refresh here to release the transaction earlier
-	w.cache.Update(span.Process.ServiceName, span.OperationName, expireTime)
+	w.cache.Update(span.Process.ServiceName, span.OperationName, string(kind), expireTime)
 
 	return err
 }
