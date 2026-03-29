@@ -6,8 +6,8 @@ package file
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
+	"github.com/jaegertracing/jaeger/internal/jjson"
 	"net/http"
 	"net/url"
 	"os"
@@ -58,8 +58,12 @@ func NewProvider(options Options, logger *zap.Logger) (samplingstrategy.Provider
 	}
 
 	loadFn := h.samplingStrategyLoader(options.StrategiesFile)
-	strategies, err := loadStrategies(loadFn)
+	strategyBytes, err := loadFn()
 	if err != nil {
+		return nil, err
+	}
+	var strategies *strategies
+	if err := jjson.Unmarshal(strategyBytes, &strategies, "strategies"); err != nil {
 		return nil, err
 	} else if strategies == nil {
 		h.logger.Info("No sampling strategies found or URL is unavailable, using defaults")
@@ -176,26 +180,12 @@ func (h *samplingProvider) reloadSamplingStrategy(loadFn strategyLoader, lastVal
 
 func (h *samplingProvider) updateSamplingStrategy(dataBytes []byte) error {
 	var strategies strategies
-	if err := json.Unmarshal(dataBytes, &strategies); err != nil {
-		return fmt.Errorf("failed to unmarshal sampling strategies: %w", err)
+	if err := jjson.Unmarshal(dataBytes, &strategies, "sampling strategies"); err != nil {
+		return err
 	}
 	h.parseStrategies(&strategies)
 	h.logger.Info("Updated sampling strategies:" + string(dataBytes))
 	return nil
-}
-
-// TODO good candidate for a global util function
-func loadStrategies(loadFn strategyLoader) (*strategies, error) {
-	strategyBytes, err := loadFn()
-	if err != nil {
-		return nil, err
-	}
-
-	var strategies *strategies
-	if err := json.Unmarshal(strategyBytes, &strategies); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal strategies: %w", err)
-	}
-	return strategies, nil
 }
 
 func (h *samplingProvider) parseStrategies(strategies *strategies) {
