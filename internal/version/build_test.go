@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+
+	"github.com/jaegertracing/jaeger/internal/metricstest"
 )
 
 func TestGet(t *testing.T) {
@@ -32,4 +34,25 @@ func TestString(t *testing.T) {
 	}
 	expectedOutput := "git-commit=foobar, git-version=v1.2.3, build-date=2024-01-04"
 	assert.Equal(t, expectedOutput, test.String())
+}
+
+func TestNewInfoMetrics(t *testing.T) {
+	commitSHA = "foobar"
+	latestVersion = "v1.2.3"
+	date = "2024-01-04"
+
+	f := metricstest.NewFactory(0)
+	defer f.Stop()
+
+	NewInfoMetrics(f)
+
+	_, gauges := f.Snapshot()
+
+	expectedTags := map[string]string{
+		"revision":   commitSHA,
+		"version":    latestVersion,
+		"build_date": date,
+	}
+	key := metricstest.GetKey("build_info", expectedTags, "|", "=")
+	assert.EqualValues(t, 1, gauges[key])
 }
