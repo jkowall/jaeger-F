@@ -125,6 +125,26 @@ func TestLocalMetrics(t *testing.T) {
 	require.Empty(t, g)
 }
 
+func TestUpdateGauge(t *testing.T) {
+	f := NewFactory(0)
+	defer f.Stop()
+
+	// Test UpdateGauge via Factory
+	gauge := f.Gauge(metrics.Options{Name: "test_gauge", Tags: map[string]string{"key": "value"}})
+	gauge.Update(42)
+	f.AssertGaugeMetrics(t, ExpectedMetric{Name: "test_gauge", Tags: map[string]string{"key": "value"}, Value: 42})
+
+	gauge.Update(100)
+	f.AssertGaugeMetrics(t, ExpectedMetric{Name: "test_gauge", Tags: map[string]string{"key": "value"}, Value: 100})
+
+	// Test UpdateGauge directly on Backend
+	f.Backend.UpdateGauge("direct_gauge", nil, 50)
+	f.AssertGaugeMetrics(t, ExpectedMetric{Name: "direct_gauge", Value: 50})
+
+	f.Backend.UpdateGauge("direct_gauge", nil, 75)
+	f.AssertGaugeMetrics(t, ExpectedMetric{Name: "direct_gauge", Value: 75})
+}
+
 func TestLocalMetricsInterval(t *testing.T) {
 	f := NewFactory(time.Millisecond)
 	defer f.Stop()
