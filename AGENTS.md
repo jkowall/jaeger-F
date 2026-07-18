@@ -81,3 +81,15 @@ RFCs (`docs/rfc/`) are point-in-time proposals; ADRs (`docs/adr/`) are decision 
 ## When in Doubt
 
 Stop and ask rather than guessing. It is better to surface a question in the PR description than to invent behavior, fabricate API names, or silence failing checks.
+
+## Cursor Cloud specific instructions
+
+The startup update script already runs `git submodule update --init --recursive`, `go mod download`, and `make install-tools` (dev tools are built into `.tools/`, not installed globally). Standard commands (`make test`, `make lint`, `make fmt`) are documented above and in `CONTRIBUTING.md`.
+
+Non-obvious caveats for running Jaeger v2 (`cmd/jaeger`) locally:
+
+- Run `make build-ui` once before running the app. It embeds UI assets (downloading a prebuilt release tarball) into the Go tree; without it the query extension serves only a placeholder page. It is a build step, so it is intentionally not in the update script.
+- Building the UI *from source* needs Node.js 24+; the VM ships Node 22, but `make build-ui` downloads prebuilt assets so source-building is not required for normal dev.
+- Start the all-in-one binary (collector + query + UI + in-memory storage) with `go run ./cmd/jaeger --config ./cmd/jaeger/config.yaml`, and run it **from the repo root**. The config uses the relative path `./cmd/jaeger/config-ui.json`, so running from another directory (e.g. `cmd/jaeger/`) panics with "cannot read UI config file". Running `go run ./cmd/jaeger` with no `--config` uses the embedded all-in-one config and also works.
+- Default ports: UI + query API on `16686`, OTLP on `4317` (gRPC) / `4318` (HTTP). Generate test traces with `go run ./cmd/tracegen -traces N -service <name>`, then query via the UI or `curl http://localhost:16686/api/services`.
+- The AI health-check log line `websocket dial ws://localhost:16688 ... connection refused` is expected when no AI sidecar is running and does not affect core functionality.
