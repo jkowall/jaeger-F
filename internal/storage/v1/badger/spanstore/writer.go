@@ -24,15 +24,21 @@ import (
 */
 
 const (
-	spanKeyPrefix         byte = 0x80 // All span keys should have first bit set to 1
-	indexKeyRange         byte = 0x0F // Secondary indexes use last 4 bits
-	serviceNameIndexKey   byte = 0x81
-	operationNameIndexKey byte = 0x82
-	tagIndexKey           byte = 0x83
-	durationIndexKey      byte = 0x84
-	jsonEncoding          byte = 0x01 // Last 4 bits of the meta byte are for encoding type
-	protoEncoding         byte = 0x02 // Last 4 bits of the meta byte are for encoding type
-	defaultEncoding       byte = protoEncoding
+	spanKeyPrefix       byte = 0x80 // All span keys should have first bit set to 1
+	indexKeyRange       byte = 0x0F // Secondary indexes use last 4 bits
+	serviceNameIndexKey byte = 0x81
+	// legacyOperationNameIndexKey and legacyTagIndexKey are the unframed
+	// operation and tag indexes. Equal-length splits of the concatenated
+	// fields were the same key, so they are neither written nor read.
+	// Entries already stored under them expire with the span TTL.
+	legacyOperationNameIndexKey byte = 0x82
+	legacyTagIndexKey           byte = 0x83
+	durationIndexKey            byte = 0x84
+	operationNameIndexKey       byte = 0x85
+	tagIndexKey                 byte = 0x86
+	jsonEncoding                byte = 0x01 // Last 4 bits of the meta byte are for encoding type
+	protoEncoding               byte = 0x02 // Last 4 bits of the meta byte are for encoding type
+	defaultEncoding             byte = protoEncoding
 )
 
 // SpanWriter for writing spans to badger
@@ -71,7 +77,7 @@ func (w *SpanWriter) WriteSpan(_ context.Context, span *model.Span) error {
 		entriesToStore,
 		trace,
 		w.createBadgerEntry(createIndexKey(serviceNameIndexKey, []byte(span.Process.ServiceName), startTime, span.TraceID), nil, expireTime),
-		w.createBadgerEntry(createIndexKey(operationNameIndexKey, []byte(span.Process.ServiceName+span.OperationName), startTime, span.TraceID), nil, expireTime),
+		w.createBadgerEntry(createIndexKey(operationNameIndexKey, operationIndexValue(span.Process.ServiceName, span.OperationName), startTime, span.TraceID), nil, expireTime),
 	)
 
 	// It doesn't matter if we overwrite Duration index keys, everything is read at Trace level in any case
@@ -79,19 +85,18 @@ func (w *SpanWriter) WriteSpan(_ context.Context, span *model.Span) error {
 	binary.BigEndian.PutUint64(durationValue, uint64(model.DurationAsMicroseconds(span.Duration)))
 	entriesToStore = append(entriesToStore, w.createBadgerEntry(createIndexKey(durationIndexKey, durationValue, startTime, span.TraceID), nil, expireTime))
 
+	// Queries compare tag values as strings, so the indexed value is AsString.
 	for _, kv := range span.Tags {
-		// Convert everything to string since queries are done that way also
-		// KEY: it<serviceName><tagsKey><traceId> VALUE: <tagsValue>
-		entriesToStore = append(entriesToStore, w.createBadgerEntry(createIndexKey(tagIndexKey, []byte(span.Process.ServiceName+kv.Key+kv.AsString()), startTime, span.TraceID), nil, expireTime))
+		entriesToStore = append(entriesToStore, w.createBadgerEntry(createIndexKey(tagIndexKey, tagIndexValue(span.Process.ServiceName, kv.Key, kv.AsString()), startTime, span.TraceID), nil, expireTime))
 	}
 
 	for _, kv := range span.Process.Tags {
-		entriesToStore = append(entriesToStore, w.createBadgerEntry(createIndexKey(tagIndexKey, []byte(span.Process.ServiceName+kv.Key+kv.AsString()), startTime, span.TraceID), nil, expireTime))
+		entriesToStore = append(entriesToStore, w.createBadgerEntry(createIndexKey(tagIndexKey, tagIndexValue(span.Process.ServiceName, kv.Key, kv.AsString()), startTime, span.TraceID), nil, expireTime))
 	}
 
 	for _, log := range span.Logs {
 		for _, kv := range log.Fields {
-			entriesToStore = append(entriesToStore, w.createBadgerEntry(createIndexKey(tagIndexKey, []byte(span.Process.ServiceName+kv.Key+kv.AsString()), startTime, span.TraceID), nil, expireTime))
+			entriesToStore = append(entriesToStore, w.createBadgerEntry(createIndexKey(tagIndexKey, tagIndexValue(span.Process.ServiceName, kv.Key, kv.AsString()), startTime, span.TraceID), nil, expireTime))
 		}
 	}
 
@@ -115,6 +120,35 @@ func (w *SpanWriter) WriteSpan(_ context.Context, span *model.Span) error {
 	w.cache.Update(span.Process.ServiceName, span.OperationName, expireTime)
 
 	return err
+}
+
+// appendLenPrefixed writes a big-endian uint32 byte length and then s.
+// The length is what keeps a later field from sliding into an earlier one:
+// service "a" with operation "bc" and service "ab" with operation "c" must
+// not encode to the same bytes.
+func appendLenPrefixed(dst, s []byte) []byte {
+	var lb [4]byte
+	//nolint:gosec // G115 key components are far below 4GiB; uint32 is the on-disk width
+	binary.BigEndian.PutUint32(lb[:], uint32(len(s)))
+	dst = append(dst, lb[:]...)
+	return append(dst, s...)
+}
+
+// operationIndexValue is the operation-index payload. The operation name is
+// the unprefixed tail because the timestamp that follows it has a fixed size.
+func operationIndexValue(service, operation string) []byte {
+	buf := make([]byte, 0, 4+len(service)+len(operation))
+	buf = appendLenPrefixed(buf, []byte(service))
+	return append(buf, operation...)
+}
+
+// tagIndexValue is the tag-index payload. The service and the tag key are
+// length-prefixed; the tag value is the unprefixed tail.
+func tagIndexValue(service, key, value string) []byte {
+	buf := make([]byte, 0, 8+len(service)+len(key)+len(value))
+	buf = appendLenPrefixed(buf, []byte(service))
+	buf = appendLenPrefixed(buf, []byte(key))
+	return append(buf, value...)
 }
 
 func createIndexKey(indexPrefixKey byte, value []byte, startTime uint64, traceID model.TraceID) []byte {

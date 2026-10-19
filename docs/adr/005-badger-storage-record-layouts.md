@@ -1,7 +1,7 @@
 # Badger Storage Record Layouts
 
-* **Status**: Documented existing implementation
-* **Date**: 2026-03-12
+* **Status**: Documented existing implementation (operation and tag indexes reframed 2026-10-19)
+* **Date**: 2026-03-12; operation and tag index framing updated 2026-10-19
 
 ## Context
 
@@ -30,15 +30,17 @@ A single Badger database instance holds all record types. There is no separate "
 
 ### Key Prefix Summary
 
-| Record type            | Prefix byte | Used by          |
-|------------------------|-------------|------------------|
-| Span (primary record)  | `0x80`      | Span store       |
-| Service name index     | `0x81`      | Span store       |
-| Operation name index   | `0x82`      | Span store       |
-| Tag index              | `0x83`      | Span store       |
-| Duration index         | `0x84`      | Span store       |
-| Throughput             | `0x08`      | Sampling store   |
-| Probabilities/QPS      | `0x09`      | Sampling store   |
+| Record type                         | Prefix byte | Used by          |
+|-------------------------------------|-------------|------------------|
+| Span (primary record)               | `0x80`      | Span store       |
+| Service name index                  | `0x81`      | Span store       |
+| Operation name index (retired)      | `0x82`      | not read         |
+| Tag index (retired)                 | `0x83`      | not read         |
+| Duration index                      | `0x84`      | Span store       |
+| Operation name index                | `0x85`      | Span store       |
+| Tag index                           | `0x86`      | Span store       |
+| Throughput                          | `0x08`      | Sampling store   |
+| Probabilities/QPS                   | `0x09`      | Sampling store   |
 
 ---
 
@@ -88,42 +90,46 @@ An index entry is written for each span, keyed by the service name of the span's
 
 ---
 
-### 3. Operation Name Index (`0x82`)
+### 3. Operation Name Index (`0x85`)
 
-An index entry is written for each span, keyed by the concatenation of service name and operation name.
+An index entry is written for each span. The service name is length-prefixed so the operation name cannot be split out of it at another boundary.
 
 **Key** (variable size):
 ```
-[0x82][serviceName + operationName: variable][startTime: 8B][traceID.High: 8B][traceID.Low: 8B]
+[0x85][serviceLen: 4B][serviceName][operationName][startTime: 8B][traceID.High: 8B][traceID.Low: 8B]
 ```
 
-- `serviceName + operationName` — the two strings concatenated directly, no separator
+- `serviceLen` — `uint32`, big-endian byte length of `serviceName`
+- `serviceName` — UTF-8 bytes of the service name
+- `operationName` — UTF-8 bytes of the operation name, running through to the timestamp
 
 **Value**: empty (`nil`)
 
-**Purpose**: enables finding trace IDs for a specific service + operation pair within a time range.
+**Purpose**: enables finding trace IDs for a specific service + operation pair within a time range. `preloadOperations` seeks `[0x85][serviceLen][serviceName]` and treats the bytes up to the timestamp as the operation name.
 
-**Note**: because the service name and operation name are concatenated without a separator, a service named `"foo"` with operation `"bar"` produces the same prefix as a service named `"foobar"` with operation `""`. The reader guards against this ambiguity by checking that the full key prefix (up to the timestamp) matches exactly.
+The previous operation index (`0x82`) stored `serviceName + operationName` with no framing. Its exact-length check compared the seek prefix length with the key length, so it rejected a shorter service name such as `"service1"` when the stored key belonged to `"service12"`. It did not distinguish two concatenations of the same total length: service `"a"` with operation `"bc"` and service `"ab"` with operation `"c"` were the same key. `0x82` is no longer written or read. Operation search, and `GetOperations` after a process restart, do not see spans that were indexed only under `0x82` until those entries expire with the span TTL. Fetch by trace ID uses the primary record and is unaffected.
 
 **TTL**: same as the corresponding primary span record.
 
 ---
 
-### 4. Tag Index (`0x83`)
+### 4. Tag Index (`0x86`)
 
-For each searchable tag key-value pair associated with a span, a separate index entry is written. Tags are indexed from three sources: `span.Tags`, `span.Process.Tags`, and `log.Fields` for each log entry.
+For each searchable tag key-value pair associated with a span, a separate index entry is written. Tags are indexed from three sources: `span.Tags`, `span.Process.Tags`, and `log.Fields` for each log entry. The service name and the tag key are length-prefixed. The tag value is the unprefixed tail, bounded by the timestamp.
 
 **Key** (variable size):
 ```
-[0x83][serviceName + tagKey + tagValue: variable][startTime: 8B][traceID.High: 8B][traceID.Low: 8B]
+[0x86][serviceLen: 4B][serviceName][keyLen: 4B][tagKey][tagValue][startTime: 8B][traceID.High: 8B][traceID.Low: 8B]
 ```
 
-- `serviceName + tagKey + tagValue` — all three strings concatenated directly, no separators
-- Tag values are converted to their string representation via `kv.AsString()` before being embedded in the key
+- `serviceLen` and `keyLen` — `uint32`, big-endian byte lengths
+- `tagValue` — string form from `kv.AsString()`
 
 **Value**: empty (`nil`)
 
 **Purpose**: enables finding trace IDs for spans that carry a specific tag key-value pair within a given service.
+
+The previous tag index (`0x83`) concatenated the service name, tag key, and tag value. The same equal-length split collided there, both across the service boundary (service `"a"`, key `"bc"`, value `"v"` against service `"ab"`, key `"c"`, value `"v"`) and between a key and a value inside one service (key `"a"` / value `"bc"` against key `"ab"` / value `"c"`). `0x83` is no longer written or read. Tag search over spans indexed only under `0x83` returns nothing until those entries expire with the span TTL. Fetch by trace ID is unaffected.
 
 **TTL**: same as the corresponding primary span record.
 
@@ -217,7 +223,7 @@ Service names and operation names are not queried directly from Badger on every 
 
 The cache is populated in two ways:
 1. **On write**: `cache.Update(serviceName, operationName, expireTime)` is called after every `WriteSpan`, keeping the cache current without re-scanning Badger.
-2. **On startup** (if `prefillCache=true`): the reader scans all service name index keys (`0x81`) and operation name index keys (`0x82`) to preload any entries persisted from a previous run.
+2. **On startup** (if `prefillCache=true`): the reader scans all service name index keys (`0x81`) and operation name index keys (`0x85`) to preload any entries persisted from a previous run. Retired `0x82` operation keys are not loaded.
 
 Expired entries are lazily removed from the cache when `GetServices` or `GetOperations` is called.
 
@@ -264,7 +270,7 @@ The record layouts described above were chosen to satisfy the following requirem
 
 - **Not distributed**: Badger is a single-node store. It is not suitable for high-throughput or multi-instance deployments.
 - **No spanKind in operations**: the operation name index does not encode span kind, so `GetOperations` returns operations without span kind information (tracked in [issue #1922](https://github.com/jaegertracing/jaeger/issues/1922)).
-- **String concatenation without separators**: the absence of separators between service name, tag key, and tag value in composite index keys means that a suffix of one component can collide with a prefix of the next. The implementation handles this with exact-prefix length checks but it is a latent source of subtle bugs if the key format is extended.
+- **Retired operation and tag keys**: `0x82` and `0x83` concatenated fields with no framing. The exact-length check on those keys only rejected a different total length; service `"a"` / operation `"bc"` was the same key as service `"ab"` / operation `"c"`, and tag keys and values split the same way. Readers ignore both prefixes. After an upgrade, operation and tag queries return nothing for spans written before the upgrade, and a restarted operation cache omits those operations, until the span TTL expires (default 72 hours). Fetch by trace ID still reads the primary `0x80` record. Service and duration indexes are unchanged.
 - **No dependency index**: the dependency store computes dependency links via a full trace scan on every request rather than maintaining a dedicated index, which may be slow for large datasets.
 - **Sampling entries have no TTL**: throughput and probabilities records are not automatically expired and accumulate indefinitely unless explicitly pruned.
 - **Ephemeral by default**: the default configuration (`Ephemeral: true`) stores data in a temporary directory that is deleted on process exit, which may surprise users who expect data to persist across restarts.

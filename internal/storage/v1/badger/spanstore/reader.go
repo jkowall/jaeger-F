@@ -264,17 +264,16 @@ func serviceQueries(query *spanstore.TraceQueryParameters, indexSeeks [][]byte) 
 		indexSearchKey := make([]byte, 0, 64) // 64 is a magic guess
 		tagQueryUsed := false
 		for k, v := range query.Tags {
-			tagSearch := []byte(query.ServiceName + k + v)
-			tagSearchKey := make([]byte, 0, len(tagSearch)+1)
+			tagSearchKey := make([]byte, 0, 1+8+len(query.ServiceName)+len(k)+len(v))
 			tagSearchKey = append(tagSearchKey, tagIndexKey)
-			tagSearchKey = append(tagSearchKey, tagSearch...)
+			tagSearchKey = append(tagSearchKey, tagIndexValue(query.ServiceName, k, v)...)
 			indexSeeks = append(indexSeeks, tagSearchKey)
 			tagQueryUsed = true
 		}
 
 		if query.OperationName != "" {
 			indexSearchKey = append(indexSearchKey, operationNameIndexKey)
-			indexSearchKey = append(indexSearchKey, []byte(query.ServiceName+query.OperationName)...)
+			indexSearchKey = append(indexSearchKey, operationIndexValue(query.ServiceName, query.OperationName)...)
 		} else if !tagQueryUsed { // Tag query already reduces the search set with a serviceName
 			indexSearchKey = append(indexSearchKey, serviceNameIndexKey)
 			indexSearchKey = append(indexSearchKey, []byte(query.ServiceName)...)
@@ -648,11 +647,11 @@ func (r *TraceReader) preloadOperations(service string) {
 		it := txn.NewIterator(opts)
 		defer it.Close()
 
-		serviceKey := make([]byte, len(service)+1)
-		serviceKey[0] = operationNameIndexKey
-		copy(serviceKey[1:], service)
+		// The length prefix keeps service "a" from matching the keys of service "ab".
+		serviceKey := make([]byte, 0, 1+4+len(service))
+		serviceKey = append(serviceKey, operationNameIndexKey)
+		serviceKey = appendLenPrefixed(serviceKey, []byte(service))
 
-		// Seek all the services first
 		for it.Seek(serviceKey); it.ValidForPrefix(serviceKey); it.Next() {
 			timestampStartIndex := len(it.Item().Key()) - (sizeOfTraceID + 8) // 8 = sizeof(uint64)
 			operationName := string(it.Item().Key()[len(serviceKey):timestampStartIndex])
