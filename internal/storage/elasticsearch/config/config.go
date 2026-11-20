@@ -301,6 +301,10 @@ type Configuration struct {
 	// For alias-based rotation (manual_rollover/auto_rollover), this should be set
 	// to match the ILM/ISM data retention policy so that GetTraces can find traces
 	// up to that age.
+	// For periodic rotation, a span that starts earlier than this, or more than an
+	// hour in the future, is written to the index at the nearest edge of that window
+	// rather than one of its own, so a client-supplied timestamp cannot create
+	// indices outside it.
 	MaxSpanAge time.Duration `mapstructure:"max_span_age"`
 	// MaxTraceDuration is the maximum expected duration of a single trace
 	// (time between the earliest and latest span in the trace).

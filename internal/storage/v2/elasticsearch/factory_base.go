@@ -191,6 +191,7 @@ func (f *FactoryBase) GetSpanWriterParams() esspanstore.SpanWriterParams {
 		ServiceOperations: f.serviceOperations,
 		SpanRotation:      spanRotation,
 		ServiceRotation:   serviceRotation,
+		MaxSpanAge:        f.config.MaxSpanAge,
 	}
 }
 

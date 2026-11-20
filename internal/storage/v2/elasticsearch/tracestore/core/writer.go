@@ -24,6 +24,14 @@ import (
 	"github.com/jaegertracing/jaeger/internal/storage/v2/elasticsearch/tracestore/core/dbmodel"
 )
 
+// DefaultMaxSpanAge is the default max_span_age: how far back the reader looks for
+// a trace in periodic indices, and how old a span start may be when it selects one.
+const DefaultMaxSpanAge = 72 * time.Hour
+
+// maxFutureSpanSkew is how far ahead of this process's clock a span start may be
+// and still select the index of its own period.
+const maxFutureSpanSkew = time.Hour
+
 // SpanWriter writes spans and their service:operation pairs through an
 // esclient.BatchWriter — the async indexer or the synchronous bulk writer, chosen by
 // the factory. Which one is not the writer's concern; it assembles the batch and
@@ -38,6 +46,8 @@ type SpanWriter struct {
 	allTagsAsFields   bool
 	tagDotReplacement string
 	tagKeysAsFields   map[string]bool
+	maxSpanAge        time.Duration
+	now               func() time.Time
 }
 
 // Writer is a DB-Level abstraction which directly deals with database level operations
@@ -66,6 +76,9 @@ type SpanWriterParams struct {
 	TagDotReplacement string
 	SpanRotation      indices.Rotation
 	ServiceRotation   indices.Rotation
+	// MaxSpanAge bounds how old a span start may be when it selects a periodic write
+	// index; zero means DefaultMaxSpanAge.
+	MaxSpanAge time.Duration
 }
 
 // NewSpanWriter creates a new SpanWriter for use
@@ -73,6 +86,10 @@ func NewSpanWriter(p SpanWriterParams) *SpanWriter {
 	tags := map[string]bool{}
 	for _, k := range p.TagKeysAsFields {
 		tags[k] = true
+	}
+	maxSpanAge := p.MaxSpanAge
+	if maxSpanAge <= 0 {
+		maxSpanAge = DefaultMaxSpanAge
 	}
 
 	return &SpanWriter{
@@ -85,7 +102,23 @@ func NewSpanWriter(p SpanWriterParams) *SpanWriter {
 		tagKeysAsFields:   tags,
 		allTagsAsFields:   p.AllTagsAsFields,
 		tagDotReplacement: p.TagDotReplacement,
+		maxSpanAge:        maxSpanAge,
+		now:               time.Now,
 	}
+}
+
+// indexTime returns the time that selects the write index of a span starting at
+// spanStart. The start is client-supplied and, under periodic rotation, every
+// distinct period it names is a new index, so it is clamped to
+// [now-maxSpanAge, now+maxFutureSpanSkew]. The span document keeps its real start.
+func (s *SpanWriter) indexTime(spanStart, now time.Time) time.Time {
+	if oldest := now.Add(-s.maxSpanAge); spanStart.Before(oldest) {
+		return oldest
+	}
+	if latest := now.Add(maxFutureSpanSkew); spanStart.After(latest) {
+		return latest
+	}
+	return spanStart
 }
 
 // WriteSpans assembles the whole batch's documents — each span, plus any new
@@ -99,13 +132,15 @@ func (s *SpanWriter) WriteSpans(ctx context.Context, spans []dbmodel.Span) error
 	// service:operation lookup document. It lets a per-document rejection reported
 	// by the batch writer be attributed back to the span it concerns (RFC 0007 §4.8).
 	itemIDToSpan := make(map[string]*dbmodel.Span, len(spans))
+	now := s.now()
 	for i := range spans {
 		span := &spans[i]
 		s.writerMetrics.Attempts.Inc(1)
 		spanStartTime := model.EpochMicrosecondsAsTime(span.StartTime)
+		indexTime := s.indexTime(spanStartTime, now)
 
 		// Service:operation pair doc, deduped to one doc per batch unless already cached.
-		if item, ok := serviceOps.toUpsertItem(s.serviceRotation.WriteTarget(spanStartTime), span); ok {
+		if item, ok := serviceOps.toUpsertItem(s.serviceRotation.WriteTarget(indexTime), span); ok {
 			items = append(items, item)
 			itemIDToSpan[item.ID] = nil
 		}
@@ -115,7 +150,7 @@ func (s *SpanWriter) WriteSpans(ctx context.Context, spans []dbmodel.Span) error
 		if s.spanRotation.RequiresDocumentTimestamp() {
 			span.Timestamp = spanStartTime.Format(time.RFC3339Nano)
 		}
-		item, err := s.buildSpanItem(s.spanRotation.WriteTarget(spanStartTime), span)
+		item, err := s.buildSpanItem(s.spanRotation.WriteTarget(indexTime), span)
 		if err != nil {
 			// A span carrying an unencodable value (e.g. a NaN/Inf float tag) cannot
 			// be stored; drop it rather than fail the batch.
