@@ -21,7 +21,17 @@ import (
 
 const (
 	maxProbabilities = 10
+
+	// Service and operation names come from incoming spans, so the number of
+	// service/operation pairs kept per calculation interval and the length of
+	// each name are bounded. Pairs beyond these limits are dropped.
+	maxOperations = 1024
+	maxNameLength = 256
 )
+
+func isNameWithinLimit(service, operation string) bool {
+	return len(service) <= maxNameLength && len(operation) <= maxNameLength
+}
 
 // aggregator is a kind of trace processor that watches for root spans
 // and calculates how many traces per service / per endpoint are being
@@ -35,6 +45,8 @@ type aggregator struct {
 	operationsCounter   metrics.Counter
 	servicesCounter     metrics.Counter
 	currentThroughput   serviceOperationThroughput
+	currentOperations   int
+	droppedOperations   int
 	postAggregator      *PostAggregator
 	aggregationInterval time.Duration
 	storage             samplingstore.Store
@@ -75,6 +87,8 @@ func (a *aggregator) runAggregationLoop() {
 			a.Lock()
 			a.saveThroughput()
 			a.currentThroughput = make(serviceOperationThroughput)
+			a.currentOperations = 0
+			a.droppedOperations = 0
 			a.postAggregator.runCalculation()
 			a.Unlock()
 		case <-a.stop:
@@ -95,23 +109,40 @@ func (a *aggregator) saveThroughput() {
 	}
 	a.operationsCounter.Inc(int64(totalOperations))
 	a.servicesCounter.Inc(int64(len(a.currentThroughput)))
+	if a.droppedOperations > 0 {
+		a.postAggregator.logger.Warn("dropped throughput for operations over the adaptive sampling limits",
+			zap.Int("dropped", a.droppedOperations),
+			zap.Int("maxOperations", maxOperations),
+			zap.Int("maxNameLength", maxNameLength))
+	}
 	a.storage.InsertThroughput(throughputSlice)
 }
 
 func (a *aggregator) RecordThroughput(service, operation string, samplerType spanmodel.SamplerType, probability float64) {
 	a.Lock()
 	defer a.Unlock()
-	if _, ok := a.currentThroughput[service]; !ok {
-		a.currentThroughput[service] = make(map[string]*model.Throughput)
+	if !isNameWithinLimit(service, operation) {
+		a.droppedOperations++
+		return
 	}
-	throughput, ok := a.currentThroughput[service][operation]
+	opThroughput := a.currentThroughput[service]
+	throughput, ok := opThroughput[operation]
 	if !ok {
+		if a.currentOperations >= maxOperations {
+			a.droppedOperations++
+			return
+		}
+		if opThroughput == nil {
+			opThroughput = make(map[string]*model.Throughput)
+			a.currentThroughput[service] = opThroughput
+		}
 		throughput = &model.Throughput{
 			Service:       service,
 			Operation:     operation,
 			Probabilities: make(map[string]struct{}),
 		}
-		a.currentThroughput[service][operation] = throughput
+		opThroughput[operation] = throughput
+		a.currentOperations++
 	}
 	probStr := TruncateFloat(probability)
 	if len(throughput.Probabilities) != maxProbabilities {
