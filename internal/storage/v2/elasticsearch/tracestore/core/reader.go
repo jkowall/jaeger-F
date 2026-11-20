@@ -84,6 +84,8 @@ var (
 // There are two read operations with different time-range semantics:
 //
 //  1. FindTraceIDs: the user always supplies [StartTimeMin, StartTimeMax]. No adjustment needed.
+//     With periodic indices the window may be at most maxSpanAge, since ReadTargets lists one
+//     index per rollover step of it; a wider window is refused as an invalid query.
 //
 //  2. GetTraces (by trace ID): no time range is known. The reader uses [now-maxSpanAge, now].
 //     - Periodic indices: maxSpanAge should match data retention (e.g., 7d). ReadTargets generates
@@ -325,7 +327,11 @@ func (s *SpanReader) multiRead(ctx context.Context, traceIDs []dbmodel.TraceID, 
 	}
 
 	// See timeRangeDesign above for context on the padding and the alias filter.
-	idxList := s.spanRotation.ReadTargets(startTime.Add(-s.maxTraceDuration), endTime.Add(s.maxTraceDuration))
+	idxList, err := s.paddedReadTargets(startTime, endTime)
+	if err != nil {
+		logErrorToSpan(childSpan, err)
+		return nil, err
+	}
 	searchAfter := make(map[dbmodel.TraceID]traceReadCursor)
 	totalDocumentsFetched := make(map[dbmodel.TraceID]int)
 	tracesMap := make(map[dbmodel.TraceID]*dbmodel.Trace)
@@ -401,6 +407,23 @@ func (s *SpanReader) multiRead(ctx context.Context, traceIDs []dbmodel.TraceID, 
 		}
 	}
 	return traces, nil
+}
+
+// searchReadTargets lists the span indices of a search window. A search may look back at
+// most maxSpanAge, the same window a read by trace ID covers.
+func (s *SpanReader) searchReadTargets(startTime, endTime time.Time) ([]string, error) {
+	return indices.ReadTargetsWithin(s.spanRotation, startTime, endTime, s.maxSpanAge)
+}
+
+// paddedReadTargets lists the span indices of a window widened by maxTraceDuration on both
+// sides, which is how the spans of whole traces are read (see timeRangeDesign above).
+func (s *SpanReader) paddedReadTargets(startTime, endTime time.Time) ([]string, error) {
+	return indices.ReadTargetsWithin(
+		s.spanRotation,
+		startTime.Add(-s.maxTraceDuration),
+		endTime.Add(s.maxTraceDuration),
+		s.maxSpanAge+2*s.maxTraceDuration,
+	)
 }
 
 func buildTraceByIDQuery(traceID dbmodel.TraceID) esquery.Query {
@@ -481,7 +504,10 @@ func (s *SpanReader) findTraceIDsFromQuery(ctx context.Context, traceQuery dbmod
 	if err != nil {
 		return nil, err
 	}
-	jaegerIndices := s.spanRotation.ReadTargets(traceQuery.StartTimeMin, traceQuery.StartTimeMax)
+	jaegerIndices, err := s.searchReadTargets(traceQuery.StartTimeMin, traceQuery.StartTimeMax)
+	if err != nil {
+		return nil, err
+	}
 
 	searchResult, err := s.searcher.Search(ctx, jaegerIndices, esclient.SearchRequest{
 		Size:  0, // set to 0 because we don't want actual documents.

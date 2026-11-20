@@ -80,7 +80,10 @@ func (s *SpanReader) FindSpans(ctx context.Context, query dbmodel.SpanQueryParam
 	if err != nil {
 		return dbmodel.SpanPage{}, err
 	}
-	indices := s.spanRotation.ReadTargets(query.StartTimeMin, query.StartTimeMax)
+	indices, err := s.searchReadTargets(query.StartTimeMin, query.StartTimeMax)
+	if err != nil {
+		return dbmodel.SpanPage{}, err
+	}
 	result, err := s.searcher.Search(ctx, indices, req)
 	if err != nil {
 		s.logger.Info("es span search failed", zap.Error(err))

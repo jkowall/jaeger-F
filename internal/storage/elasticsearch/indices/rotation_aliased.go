@@ -33,5 +33,7 @@ func (s *AliasedRotation) ReadTargets(time.Time, time.Time) []string {
 	return []string{s.readAlias}
 }
 
+func (*AliasedRotation) readTargetsIgnoreRange() bool { return true }
+
 func (*AliasedRotation) WriteOpType() es.WriteOpType     { return es.WriteOpIndex }
 func (*AliasedRotation) RequiresDocumentTimestamp() bool { return false }
