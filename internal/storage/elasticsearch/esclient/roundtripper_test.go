@@ -80,7 +80,7 @@ func TestGetHTTPRoundTripper(t *testing.T) {
 				assert.NotNil(t, rt)
 				transport, ok := rt.(*http.Transport)
 				require.True(t, ok)
-				assert.True(t, transport.TLSClientConfig.InsecureSkipVerify)
+				assert.Nil(t, transport.TLSClientConfig, "TLS disabled must not install a config that skips verification")
 			},
 		},
 		{
@@ -100,7 +100,7 @@ func TestGetHTTPRoundTripper(t *testing.T) {
 
 				transport, ok := rt.(*http.Transport)
 				assert.True(t, ok, "Should be plain http.Transport")
-				assert.True(t, transport.TLSClientConfig.InsecureSkipVerify)
+				assert.Nil(t, transport.TLSClientConfig)
 			},
 		},
 		{
@@ -141,7 +141,7 @@ func TestGetHTTPRoundTripper(t *testing.T) {
 
 				transport, ok := authRT.Transport.(*http.Transport)
 				require.True(t, ok)
-				assert.True(t, transport.TLSClientConfig.InsecureSkipVerify)
+				assert.Nil(t, transport.TLSClientConfig)
 			},
 		},
 		{
