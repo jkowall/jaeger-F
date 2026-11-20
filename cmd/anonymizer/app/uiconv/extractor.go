@@ -11,6 +11,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/jaegertracing/jaeger/cmd/anonymizer/app/internal/privatefile"
 	"github.com/jaegertracing/jaeger/internal/uimodel"
 )
 
@@ -24,7 +25,7 @@ type extractor struct {
 
 // newExtractor creates extractor.
 func newExtractor(uiFile string, traceID string, reader *spanReader, logger *zap.Logger) (*extractor, error) {
-	f, err := os.OpenFile(uiFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.ModePerm)
+	f, err := privatefile.Create(uiFile)
 	if err != nil {
 		return nil, fmt.Errorf("cannot create output file: %w", err)
 	}
