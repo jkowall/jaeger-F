@@ -5,9 +5,12 @@ package anonymizer
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"hash/fnv"
 	"os"
 	"path/filepath"
 	"sync"
@@ -31,9 +34,15 @@ var allowedTags = map[string]bool{
 
 const PermUserRW = 0o600 // Read-write for owner only
 
-// mapping stores the mapping of service/operation names to their one-way hashes,
+const hashKeySize = 32
+
+// mapping stores the mapping of service/operation names to their keyed hashes,
 // so that we can do a reverse lookup should the researchers have questions.
 type mapping struct {
+	// HashKey is the hex-encoded HMAC key for all hashes in the anonymized output.
+	// Anyone holding it can test guesses against those hashes, so it must only be
+	// stored in the owner-only mapping file.
+	HashKey    string
 	Services   map[string]string
 	Operations map[string]string // key=[service]:operation
 }
@@ -84,6 +93,9 @@ func New(mappingFile string, options Options, logger *zap.Logger) *Anonymizer {
 			logger.Fatal("Cannot unmarshal previous mapping", zap.Error(err))
 		}
 	}
+	if a.mapping.HashKey == "" {
+		a.mapping.HashKey = newHashKey()
+	}
 	a.wg.Go(func() {
 		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
@@ -119,7 +131,8 @@ func (a *Anonymizer) SaveMapping() {
 		a.logger.Error("Failed to write mapping file", zap.Error(err))
 		return
 	}
-	a.logger.Sugar().Infof("Saved mapping file %s: %s", a.mappingFile, string(dat))
+	a.logger.Sugar().Infof("Saved mapping file %s: %d services, %d operations",
+		a.mappingFile, len(a.mapping.Services), len(a.mapping.Operations))
 }
 
 func (a *Anonymizer) mapServiceName(service string) string {
@@ -137,15 +150,23 @@ func (a *Anonymizer) mapString(v string, m map[string]string) string {
 	if s, ok := m[v]; ok {
 		return s
 	}
-	s := hash(v)
+	s := a.hash(v)
 	m[v] = s
 	return s
 }
 
-func hash(value string) string {
-	h := fnv.New64()
-	_, _ = h.Write([]byte(value))
-	return fmt.Sprintf("%016x", h.Sum64())
+func newHashKey() string {
+	key := make([]byte, hashKeySize)
+	_, _ = rand.Read(key) // crypto/rand.Read never returns an error, it crashes the program instead
+	return hex.EncodeToString(key)
+}
+
+// hash returns a truncated HMAC-SHA256 of value under the mapping's secret key,
+// so that it cannot be recomputed from a dictionary of candidate names.
+func (a *Anonymizer) hash(value string) string {
+	m := hmac.New(sha256.New, []byte(a.mapping.HashKey))
+	_, _ = m.Write([]byte(value))
+	return hex.EncodeToString(m.Sum(nil)[:8])
 }
 
 // AnonymizeSpan obfuscates and converts the span.
@@ -156,11 +177,11 @@ func (a *Anonymizer) AnonymizeSpan(span *model.Span) *uimodel.Span {
 	outputTags := filterStandardTags(span.Tags)
 	// when true, the allowedTags are hashed and when false they are preserved as it is
 	if a.options.HashStandardTags {
-		outputTags = hashTags(outputTags)
+		outputTags = a.hashTags(outputTags)
 	}
 	// when true, all tags other than allowedTags are hashed, when false they are dropped
 	if a.options.HashCustomTags {
-		customTags := hashTags(filterCustomTags(span.Tags))
+		customTags := a.hashTags(filterCustomTags(span.Tags))
 		outputTags = append(outputTags, customTags...)
 	}
 	span.Tags = outputTags
@@ -168,7 +189,7 @@ func (a *Anonymizer) AnonymizeSpan(span *model.Span) *uimodel.Span {
 	// when true, logs are hashed, when false, they are dropped
 	if a.options.HashLogs {
 		for _, log := range span.Logs {
-			log.Fields = hashTags(log.Fields)
+			log.Fields = a.hashTags(log.Fields)
 		}
 	} else {
 		span.Logs = nil
@@ -178,7 +199,7 @@ func (a *Anonymizer) AnonymizeSpan(span *model.Span) *uimodel.Span {
 
 	// when true, process tags are hashed, when false they are dropped
 	if a.options.HashProcess {
-		span.Process.Tags = hashTags(span.Process.Tags)
+		span.Process.Tags = a.hashTags(span.Process.Tags)
 	} else {
 		span.Process.Tags = nil
 	}
@@ -224,10 +245,10 @@ func filterCustomTags(tags []model.KeyValue) []model.KeyValue {
 
 // hashTags converts each tag into corresponding string values
 // and then find its hash
-func hashTags(tags []model.KeyValue) []model.KeyValue {
+func (a *Anonymizer) hashTags(tags []model.KeyValue) []model.KeyValue {
 	out := make([]model.KeyValue, 0, len(tags))
 	for _, tag := range tags {
-		kv := model.String(hash(tag.Key), hash(tag.AsString()))
+		kv := model.String(a.hash(tag.Key), a.hash(tag.AsString()))
 		out = append(out, kv)
 	}
 	return out
