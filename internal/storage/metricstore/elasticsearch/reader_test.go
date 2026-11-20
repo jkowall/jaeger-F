@@ -1150,8 +1150,9 @@ func setupMetricsReaderFromServer(t *testing.T, mockServer *httptest.Server) (*M
 	tracer, exporter := tracerProvider(t)
 
 	cfg := config.Configuration{
-		Servers:  []string{mockServer.URL},
-		LogLevel: "debug",
+		Servers:    []string{mockServer.URL},
+		LogLevel:   "debug",
+		MaxSpanAge: 72 * time.Hour,
 		Indices: config.Indices{
 			Spans: config.SpanIndexOptions{
 				Tags: config.TagsAsFields{
@@ -1202,9 +1203,10 @@ func newMetricsClient(t *testing.T, url string, version es.BackendVersion) escli
 // deterministic across versions.
 func metricsSnapshotConfig(url string, version es.BackendVersion) config.Configuration {
 	return config.Configuration{
-		Servers:  []string{url},
-		Version:  uint(version),
-		LogLevel: "info",
+		Servers:    []string{url},
+		Version:    uint(version),
+		LogLevel:   "info",
+		MaxSpanAge: 72 * time.Hour,
 		Indices: config.Indices{
 			Spans: config.SpanIndexOptions{
 				Tags: config.TagsAsFields{

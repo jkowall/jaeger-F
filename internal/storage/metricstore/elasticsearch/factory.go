@@ -53,6 +53,7 @@ func (f *Factory) CreateMetricsReader() (metricstore.Reader, error) {
 		f.config.ResolvedSpanRotation(),
 		f.config.RemoteReadClusters,
 		f.telset.Logger,
+		indices.WithMaxReadWindow(f.config.SpanReadWindow()),
 	)
 	mr := NewMetricsReader(f.searcher, f.config, f.telset.Logger, f.telset.TracerProvider, spanRotation)
 	return metricstoremetrics.NewReaderDecorator(mr, f.telset.Metrics), nil

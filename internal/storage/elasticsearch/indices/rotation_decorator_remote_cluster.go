@@ -43,6 +43,8 @@ func (r *RemoteClusterRotation) ReadTargets(startTime, endTime time.Time) []stri
 	return result
 }
 
+func (r *RemoteClusterRotation) readTargetsIgnoreRange() bool { return ignoresRange(r.inner) }
+
 func (r *RemoteClusterRotation) WriteOpType() es.WriteOpType { return r.inner.WriteOpType() }
 func (r *RemoteClusterRotation) RequiresDocumentTimestamp() bool {
 	return r.inner.RequiresDocumentTimestamp()

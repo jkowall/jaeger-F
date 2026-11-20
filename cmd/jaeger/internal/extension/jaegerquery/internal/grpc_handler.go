@@ -246,6 +246,9 @@ func (g *GRPCHandler) GetDependencies(ctx context.Context, r *api_v2.GetDependen
 
 	dependencies, err := g.queryService.GetDependencies(ctx, endTime, endTime.Sub(startTime))
 	if err != nil {
+		if tracestore.IsRefusal(err) {
+			return nil, status.Error(tracestore.RefusalCode(err), err.Error())
+		}
 		g.logger.Error("failed to fetch dependencies", zap.Error(err))
 		return nil, status.Errorf(codes.Internal, "failed to fetch dependencies: %v", err)
 	}

@@ -38,6 +38,8 @@ func (l *LoggingRotation) ReadTargets(startTime, endTime time.Time) []string {
 	return targets
 }
 
+func (l *LoggingRotation) readTargetsIgnoreRange() bool { return ignoresRange(l.inner) }
+
 func (l *LoggingRotation) WriteOpType() es.WriteOpType { return l.inner.WriteOpType() }
 func (l *LoggingRotation) RequiresDocumentTimestamp() bool {
 	return l.inner.RequiresDocumentTimestamp()

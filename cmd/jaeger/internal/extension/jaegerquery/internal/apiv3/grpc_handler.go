@@ -284,7 +284,7 @@ func (h *Handler) GetDependencies(ctx context.Context, request *api_v3.GetDepend
 	lookback := endTime.Sub(startTime)
 	deps, err := h.QueryService.GetDependencies(ctx, endTime, lookback)
 	if err != nil {
-		return nil, err
+		return nil, asStatusError(err)
 	}
 	links := make([]*api_v3.Dependency, len(deps))
 	for i, dep := range deps {

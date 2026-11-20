@@ -12,11 +12,33 @@ import (
 	"github.com/jaegertracing/jaeger/internal/storage/elasticsearch/config"
 )
 
+// BuildOption adjusts a Rotation built by BuildRotation.
+type BuildOption func(*buildOptions)
+
+type buildOptions struct {
+	maxReadWindow time.Duration
+}
+
+// WithMaxReadWindow sets the widest time range a periodic rotation turns into index names
+// (DefaultMaxReadWindow when unset). It should cover the widest range any reader of the
+// rotation accepts, since a wider range is narrowed to its last maxReadWindow.
+func WithMaxReadWindow(maxReadWindow time.Duration) BuildOption {
+	return func(o *buildOptions) {
+		if maxReadWindow > 0 {
+			o.maxReadWindow = maxReadWindow
+		}
+	}
+}
+
 // BuildRotation constructs the appropriate Rotation from a resolved RotationConfig.
 // The index prefix and base name are kept raw so the strategy can derive its own
 // names: the dash-joined index prefix for periodic/alias rotations, or the
 // dot-joined data stream name for the data_stream strategy.
-func BuildRotation(indexPrefix config.IndexPrefix, baseName string, rc config.RotationConfig, remoteClusters []string, logger *zap.Logger) Rotation {
+func BuildRotation(indexPrefix config.IndexPrefix, baseName string, rc config.RotationConfig, remoteClusters []string, logger *zap.Logger, opts ...BuildOption) Rotation {
+	o := buildOptions{maxReadWindow: DefaultMaxReadWindow}
+	for _, opt := range opts {
+		opt(&o)
+	}
 	prefix := indexPrefix.Apply(baseName)
 	var r Rotation
 	switch {
@@ -52,9 +74,9 @@ func BuildRotation(indexPrefix config.IndexPrefix, baseName string, rc config.Ro
 		if dateLayout == "" {
 			dateLayout = "2006-01-02"
 		}
-		r = NewPeriodicRotation(prefix, dateLayout, rolloverFrequencyDuration(p.RolloverFrequency))
+		r = periodicRotationWithin(prefix, dateLayout, rolloverFrequencyDuration(p.RolloverFrequency), o.maxReadWindow)
 	default:
-		r = NewPeriodicRotation(prefix, "2006-01-02", 24*time.Hour)
+		r = periodicRotationWithin(prefix, "2006-01-02", 24*time.Hour, o.maxReadWindow)
 	}
 	if len(remoteClusters) > 0 {
 		r = NewRemoteClusterRotation(r, remoteClusters)

@@ -19,6 +19,11 @@ import (
 	"github.com/jaegertracing/jaeger/internal/storage/v2/elasticsearch/depstore/dbmodel"
 )
 
+// MaxLookback is the longest lookback a dependency read accepts from periodic indices. It
+// is well above the 7 days the Jaeger UI asks for, and bounds the index names a request
+// can make the reader list to one per rollover step of 30 days.
+const MaxLookback = 30 * 24 * time.Hour
+
 // CoreDependencyStore is a DB Level abstraction which directly read/write dependencies into ElasticSearch
 type CoreDependencyStore interface {
 	// WriteDependencies write dependencies to Elasticsearch
@@ -72,7 +77,10 @@ func (s *DependencyStore) WriteDependencies(ts time.Time, dependencies []dbmodel
 
 // GetDependencies returns all interservice dependencies
 func (s *DependencyStore) GetDependencies(ctx context.Context, endTs time.Time, lookback time.Duration) ([]dbmodel.DependencyLink, error) {
-	readIndices := s.rotation.ReadTargets(endTs.Add(-lookback), endTs)
+	readIndices, err := indices.ReadTargetsWithin(s.rotation, endTs.Add(-lookback), endTs, MaxLookback)
+	if err != nil {
+		return nil, err
+	}
 	searchResult, err := s.searcher.Search(ctx, readIndices, esclient.SearchRequest{
 		Size:  s.maxDocCount,
 		Query: buildTSQuery(endTs, lookback),
