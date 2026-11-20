@@ -16,6 +16,7 @@ import (
 
 	"github.com/jaegertracing/jaeger-idl/model/v1"
 	"github.com/jaegertracing/jaeger/cmd/anonymizer/app/anonymizer"
+	"github.com/jaegertracing/jaeger/cmd/anonymizer/app/internal/privatefile"
 )
 
 var ErrMaxSpansCountReached = errors.New("max spans count reached")
@@ -49,14 +50,15 @@ func New(config Config, logger *zap.Logger) (*Writer, error) {
 	}
 	logger.Sugar().Infof("Current working dir is %s", wd)
 
-	cf, err := os.OpenFile(config.CapturedFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.ModePerm)
+	cf, err := privatefile.Create(config.CapturedFile)
 	if err != nil {
 		return nil, fmt.Errorf("cannot create output file: %w", err)
 	}
 	logger.Sugar().Infof("Writing captured spans to file %s", config.CapturedFile)
 
-	af, err := os.OpenFile(config.AnonymizedFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.ModePerm)
+	af, err := privatefile.Create(config.AnonymizedFile)
 	if err != nil {
+		_ = cf.Close()
 		return nil, fmt.Errorf("cannot create output file: %w", err)
 	}
 	logger.Sugar().Infof("Writing anonymized spans to file %s", config.AnonymizedFile)

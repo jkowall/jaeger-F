@@ -4,10 +4,13 @@
 package app
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/jaegertracing/jaeger/internal/testutils"
 )
@@ -18,7 +21,7 @@ func TestOptionsWithDefaultFlags(t *testing.T) {
 	o.AddFlags(&c)
 
 	assert.Equal(t, "localhost:16686", o.QueryGRPCHostPort)
-	assert.Equal(t, "/tmp", o.OutputDir)
+	assert.Equal(t, DefaultOutputDir(), o.OutputDir)
 	assert.False(t, o.HashStandardTags)
 	assert.False(t, o.HashCustomTags)
 	assert.False(t, o.HashLogs)
@@ -56,6 +59,16 @@ func TestOptionsWithFlags(t *testing.T) {
 	assert.Equal(t, 100, o.MaxSpansCount)
 	assert.Equal(t, int64(1), o.StartTime)
 	assert.Equal(t, int64(2), o.EndTime)
+}
+
+func TestDefaultOutputDir(t *testing.T) {
+	home, err := os.UserHomeDir()
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(home, "jaeger-anonymizer"), DefaultOutputDir())
+
+	t.Setenv("HOME", "")
+	t.Setenv("USERPROFILE", "")
+	assert.Equal(t, "jaeger-anonymizer", DefaultOutputDir())
 }
 
 func TestMain(m *testing.M) {

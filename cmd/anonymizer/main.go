@@ -30,6 +30,9 @@ func main() {
 		Short: "Jaeger anonymizer hashes fields of a trace for easy sharing",
 		Long:  `Jaeger anonymizer queries Jaeger query for a trace, anonymizes fields, and store in file`,
 		Run: func(_ *cobra.Command, _ /* args */ []string) {
+			if err := os.MkdirAll(options.OutputDir, 0o700); err != nil {
+				logger.Fatal("error while creating output directory", zap.Error(err))
+			}
 			prefix := options.OutputDir + "/" + options.TraceID
 			conf := writer.Config{
 				MaxSpansCount:  options.MaxSpansCount,
