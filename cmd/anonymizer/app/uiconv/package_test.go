@@ -10,5 +10,8 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	if exposureChild() {
+		return
+	}
 	testutils.VerifyGoLeaks(m)
 }
