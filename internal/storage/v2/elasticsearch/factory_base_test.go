@@ -834,6 +834,15 @@ func TestGetSpanReaderParams_NonPeriodicMaxSpanAge(t *testing.T) {
 	assert.Equal(t, 72*time.Hour, params.ServicesMaxLookback)
 }
 
+// TestGetSpanWriterParams_MaxSpanAge checks that max_span_age reaches the writer,
+// which bounds the periodic index a span start time may select by it.
+func TestGetSpanWriterParams_MaxSpanAge(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.MaxSpanAge = 168 * time.Hour
+	f := &FactoryBase{config: &cfg, logger: zap.NewNop(), tracer: otel.GetTracerProvider()}
+	assert.Equal(t, 168*time.Hour, f.GetSpanWriterParams().MaxSpanAge)
+}
+
 // TestGetSpanReaderParams_NumericAttributes checks that indices.spans.numeric_attributes reaches
 // the reader, which is the only place it is read from on the query side.
 func TestGetSpanReaderParams_NumericAttributes(t *testing.T) {

@@ -137,6 +137,7 @@ func TestSpanWriter_WriteSpan(t *testing.T) {
 	withSpanWriter(func(w *spanWriterTest) {
 		date, err := time.Parse(time.RFC3339, "1995-04-21T22:08:41+00:00")
 		require.NoError(t, err)
+		w.writer.now = func() time.Time { return date }
 
 		span := dbmodel.Span{
 			TraceID:       "testing-traceid",
@@ -177,6 +178,7 @@ func TestSpanWriter_WriteSpans(t *testing.T) {
 	withSpanWriter(func(w *spanWriterTest) {
 		date, err := time.Parse(time.RFC3339, "1995-04-21T22:08:41+00:00")
 		require.NoError(t, err)
+		w.writer.now = func() time.Time { return date }
 		startTime := model.TimeAsEpochMicroseconds(date)
 		spans := []dbmodel.Span{
 			{
@@ -204,6 +206,103 @@ func TestSpanWriter_WriteSpans(t *testing.T) {
 			assert.Contains(t, item.Index, "1995-04-21")
 		}
 	})
+}
+
+// TestSpanWriter_IndexTimeWindow pins that a span start outside
+// [now-maxSpanAge, now+maxFutureSpanSkew] selects the periodic index at the
+// nearest edge of that window instead of one of its own, while the span document
+// keeps its real start time.
+func TestSpanWriter_IndexTimeWindow(t *testing.T) {
+	now := time.Date(2024, time.June, 18, 10, 30, 0, 0, time.UTC)
+	testCases := []struct {
+		name         string
+		maxSpanAge   time.Duration
+		start        time.Time
+		startMicros  uint64
+		useRawMicros bool
+		expectedSpan string
+		expectedSvc  string
+	}{
+		{
+			name:         "in window keeps its own period",
+			start:        now.Add(-49 * time.Hour),
+			expectedSpan: "jaeger-span-2024-06-16-09",
+			expectedSvc:  "jaeger-service-2024-06-16",
+		},
+		{
+			name:         "default max span age bounds old starts",
+			start:        time.Date(1999, time.June, 15, 3, 4, 5, 0, time.UTC),
+			expectedSpan: "jaeger-span-2024-06-15-10",
+			expectedSvc:  "jaeger-service-2024-06-15",
+		},
+		{
+			name:         "configured max span age bounds old starts",
+			maxSpanAge:   24 * time.Hour,
+			start:        now.Add(-30 * 24 * time.Hour),
+			expectedSpan: "jaeger-span-2024-06-17-10",
+			expectedSvc:  "jaeger-service-2024-06-17",
+		},
+		{
+			name:         "small future skew keeps its own period",
+			start:        now.Add(30 * time.Minute),
+			expectedSpan: "jaeger-span-2024-06-18-11",
+			expectedSvc:  "jaeger-service-2024-06-18",
+		},
+		{
+			name:         "far future starts are bounded",
+			start:        time.Date(2099, time.January, 2, 3, 4, 5, 0, time.UTC),
+			expectedSpan: "jaeger-span-2024-06-18-11",
+			expectedSvc:  "jaeger-service-2024-06-18",
+		},
+		{
+			name:         "zero start time",
+			useRawMicros: true,
+			startMicros:  0,
+			expectedSpan: "jaeger-span-2024-06-15-10",
+			expectedSvc:  "jaeger-service-2024-06-15",
+		},
+		{
+			name:         "largest start time",
+			useRawMicros: true,
+			startMicros:  math.MaxUint64,
+			expectedSpan: "jaeger-span-2024-06-18-11",
+			expectedSvc:  "jaeger-service-2024-06-18",
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			batchWriter := &fakeBatchWriter{}
+			logger, _ := testutils.NewLogger()
+			w := NewSpanWriter(SpanWriterParams{
+				BatchWriter:       batchWriter,
+				Logger:            logger,
+				MetricsFactory:    metricstest.NewFactory(0),
+				ServiceOperations: NewServiceOperationStorage(nil, logger, 0),
+				SpanRotation:      indices.NewPeriodicRotation(config.SpanIndexName, "2006-01-02-15", time.Hour),
+				ServiceRotation:   indices.NewPeriodicRotation(config.ServiceIndexName, "2006-01-02", 24*time.Hour),
+				MaxSpanAge:        tc.maxSpanAge,
+			})
+			w.now = func() time.Time { return now }
+
+			startMicros := tc.startMicros
+			if !tc.useRawMicros {
+				startMicros = model.TimeAsEpochMicroseconds(tc.start)
+			}
+			spans := []dbmodel.Span{{
+				TraceID:       "t",
+				SpanID:        "s",
+				OperationName: "op",
+				Process:       dbmodel.Process{ServiceName: "svc"},
+				StartTime:     startMicros,
+			}}
+			require.NoError(t, w.WriteSpans(context.Background(), spans))
+
+			require.Len(t, batchWriter.items, 2)
+			assert.Equal(t, tc.expectedSvc, batchWriter.items[0].Index)
+			assert.Equal(t, tc.expectedSpan, batchWriter.items[1].Index)
+			assert.Equal(t, startMicros, spans[0].StartTime, "the document keeps the span's own start time")
+		})
+	}
 }
 
 // TestSpanWriter_WriteSpansDedupsService pins that spans sharing a (service,
