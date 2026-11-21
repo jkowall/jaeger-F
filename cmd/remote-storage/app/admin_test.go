@@ -61,6 +61,55 @@ func TestAdminServerHealthCheck(t *testing.T) {
 	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
 }
 
+func TestAdminServerProfiling(t *testing.T) {
+	routes := []string{"/debug/pprof/", "/debug/pprof/cmdline", "/debug/pprof/heap", "/debug/vars"}
+	tests := []struct {
+		name      string
+		profiling bool
+		expStatus int
+	}{
+		{name: "off by default", profiling: false, expStatus: http.StatusNotFound},
+		{name: "enabled", profiling: true, expStatus: http.StatusOK},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			adminServer := NewAdminServer()
+			zapCore, logs := observer.New(zap.InfoLevel)
+			adminServer.configure(AdminServerConfig{Endpoint: "127.0.0.1:0", Profiling: test.profiling}, zap.New(zapCore))
+			require.NoError(t, adminServer.Serve())
+			defer adminServer.Close()
+			hostPort := logs.FilterMessage("Admin server started").All()[0].ContextMap()["http.host-port"].(string)
+
+			for _, route := range routes {
+				resp, err := http.Get(fmt.Sprintf("http://%s%s", hostPort, route))
+				require.NoError(t, err)
+				resp.Body.Close()
+				assert.Equal(t, test.expStatus, resp.StatusCode, route)
+			}
+		})
+	}
+}
+
+func TestAdminServerUnknownRouteIsNotHealthCheck(t *testing.T) {
+	adminServer := NewAdminServer()
+	zapCore, logs := observer.New(zap.InfoLevel)
+	adminServer.configure(AdminServerConfig{Endpoint: "127.0.0.1:0"}, zap.New(zapCore))
+	require.NoError(t, adminServer.Serve())
+	defer adminServer.Close()
+	adminServer.Host().Ready()
+	hostPort := logs.FilterMessage("Admin server started").All()[0].ContextMap()["http.host-port"].(string)
+
+	resp, err := http.Get(fmt.Sprintf("http://%s/no-such-route", hostPort))
+	require.NoError(t, err)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+
+	resp, err = http.Get(fmt.Sprintf("http://%s/", hostPort))
+	require.NoError(t, err)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusNoContent, resp.StatusCode)
+}
+
 func TestAdminServerHandlesPortZero(t *testing.T) {
 	adminServer := NewAdminServer()
 

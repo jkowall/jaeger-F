@@ -4,11 +4,12 @@
 package app
 
 import (
-	"expvar"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/spf13/viper"
@@ -32,15 +33,47 @@ type ServiceConfig struct {
 }
 
 // AdminServerConfig is the admin section of the configuration file. It names only what
-// the admin server honors, the endpoint and TLS, and has no Unmarshal hook of its own, so
-// a misspelled key is rejected like anywhere else in the file. confighttp.ServerConfig
-// would not do: its hook ignores keys it does not know, and it carries authentication and
-// CORS settings the admin server has no host to serve them with.
+// the admin server honors, the endpoint, TLS and profiling, and has no Unmarshal hook of
+// its own, so a misspelled key is rejected like anywhere else in the file.
+// confighttp.ServerConfig would not do: its hook ignores keys it does not know, and it
+// carries authentication and CORS settings the admin server has no host to serve them with.
 type AdminServerConfig struct {
 	// Endpoint is the host:port the admin server listens on.
 	Endpoint string `mapstructure:"endpoint"`
 	// TLS, when set, serves the admin endpoints over HTTPS.
 	TLS configoptional.Optional[configtls.ServerConfig] `mapstructure:"tls"`
+	// Profiling, when true, mounts the Go profiling handlers under /debug/pprof/ and expvar
+	// on /debug/vars. They are off by default.
+	Profiling bool `mapstructure:"profiling"`
+}
+
+// Validate refuses profiling on a listener that any host could call without credentials.
+// The admin server has no authenticator, so profiling needs either a loopback endpoint or
+// TLS that requires a client certificate.
+func (c AdminServerConfig) Validate() error {
+	if !c.Profiling || isLoopbackEndpoint(c.Endpoint) || c.requiresClientCert() {
+		return nil
+	}
+	return fmt.Errorf(
+		"admin.profiling requires a loopback admin.endpoint (such as localhost:%d) or admin.tls with client_ca_file; endpoint %q is reachable from other hosts",
+		ports.RemoteStorageAdminHTTP, c.Endpoint,
+	)
+}
+
+func (c AdminServerConfig) requiresClientCert() bool {
+	return c.TLS.HasValue() && c.TLS.Get().ClientCAFile != ""
+}
+
+func isLoopbackEndpoint(endpoint string) bool {
+	host, _, err := net.SplitHostPort(endpoint)
+	if err != nil {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // DefaultServiceConfig returns the settings the service runs with when its configuration
@@ -123,15 +156,15 @@ func (s *Service) Start(cfg ServiceConfig) error {
 	}
 	s.MetricsFactory = metricsFactory
 
+	if err := cfg.Admin.Validate(); err != nil {
+		return fmt.Errorf("invalid admin configuration: %w", err)
+	}
 	s.Admin.configure(cfg.Admin, s.Logger)
 	if h := metricsBuilder.Handler(); h != nil {
 		route := metricsBuilder.HTTPRoute
 		s.Logger.Info("Mounting metrics handler on admin server", zap.String("route", route))
 		s.Admin.Handle(route, h)
 	}
-
-	s.Logger.Info("Mounting expvar handler on admin server", zap.String("route", "/debug/vars"))
-	s.Admin.Handle("/debug/vars", expvar.Handler())
 
 	if err := s.Admin.Serve(); err != nil {
 		return fmt.Errorf("cannot start the admin server: %w", err)

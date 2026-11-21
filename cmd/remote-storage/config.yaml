@@ -5,9 +5,12 @@
 # This service exposes a gRPC API for remote storage backends
 # and allows sharing single-node storage implementations like memory or Badger.
 
-# Admin server (health check, metrics, pprof); logging; metrics. Shown with their defaults.
+# Admin server (health check, metrics); logging; metrics. Shown with their defaults.
+# admin.profiling mounts /debug/pprof/ and /debug/vars; it needs a loopback endpoint or
+# admin.tls with client_ca_file.
 admin:
   endpoint: :17270
+  profiling: false
 logging:
   level: info
   encoding: json
