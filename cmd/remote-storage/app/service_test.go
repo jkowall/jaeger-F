@@ -77,6 +77,11 @@ func TestStartErrors(t *testing.T) {
 			expErr: "cannot start the admin server",
 		},
 		{
+			name:   "profiling on a wildcard endpoint",
+			modify: func(c *ServiceConfig) { c.Admin.Profiling = true },
+			expErr: "invalid admin configuration",
+		},
+		{
 			name:   "clean start",
 			modify: func(*ServiceConfig) {},
 		},
@@ -104,6 +109,39 @@ func TestStartErrors(t *testing.T) {
 
 			s.signalsChannel <- os.Interrupt
 			waitForEqual(t, true, func() any { return stopped.Load() })
+		})
+	}
+}
+
+func TestAdminServerConfigValidate(t *testing.T) {
+	mTLS := configoptional.Some(configtls.ServerConfig{ClientCAFile: "ca.pem"})
+	serverOnlyTLS := configoptional.Some(configtls.ServerConfig{})
+	tests := []struct {
+		name   string
+		cfg    AdminServerConfig
+		expErr bool
+	}{
+		{name: "profiling off on wildcard", cfg: AdminServerConfig{Endpoint: ":17270"}},
+		{name: "localhost", cfg: AdminServerConfig{Endpoint: "localhost:17270", Profiling: true}},
+		{name: "localhost upper case", cfg: AdminServerConfig{Endpoint: "LOCALHOST:17270", Profiling: true}},
+		{name: "IPv4 loopback", cfg: AdminServerConfig{Endpoint: "127.0.0.1:17270", Profiling: true}},
+		{name: "IPv6 loopback", cfg: AdminServerConfig{Endpoint: "[::1]:17270", Profiling: true}},
+		{name: "wildcard with client certificates", cfg: AdminServerConfig{Endpoint: ":17270", Profiling: true, TLS: mTLS}},
+		{name: "empty host", cfg: AdminServerConfig{Endpoint: ":17270", Profiling: true}, expErr: true},
+		{name: "IPv4 wildcard", cfg: AdminServerConfig{Endpoint: "0.0.0.0:17270", Profiling: true}, expErr: true},
+		{name: "IPv6 wildcard", cfg: AdminServerConfig{Endpoint: "[::]:17270", Profiling: true}, expErr: true},
+		{name: "other host name", cfg: AdminServerConfig{Endpoint: "localhost.example.com:17270", Profiling: true}, expErr: true},
+		{name: "unparsable endpoint", cfg: AdminServerConfig{Endpoint: "invalid", Profiling: true}, expErr: true},
+		{name: "wildcard with server-only TLS", cfg: AdminServerConfig{Endpoint: ":17270", Profiling: true, TLS: serverOnlyTLS}, expErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := test.cfg.Validate()
+			if test.expErr {
+				require.ErrorContains(t, err, "admin.profiling requires a loopback admin.endpoint")
+				return
+			}
+			require.NoError(t, err)
 		})
 	}
 }
