@@ -2,7 +2,8 @@ CREATE MATERIALIZED VIEW IF NOT EXISTS link_attribute_metadata_mv TO attribute_m
 SELECT
     tp.1 AS attribute_key,
     tp.2 AS type,
-    'link' AS level
+    'link' AS level,
+    max(start_time) AS last_seen
 FROM spans
 ARRAY JOIN arrayConcat(
     arrayMap(k -> (k, 'bool'),   arrayFlatten(links.bool_attributes.key)),

@@ -7,7 +7,8 @@ CREATE MATERIALIZED VIEW IF NOT EXISTS event_attribute_metadata_mv TO attribute_
 SELECT
     tp.1 AS attribute_key,
     tp.2 AS type,
-    'event' AS level
+    'event' AS level,
+    max(start_time) AS last_seen
 FROM spans
 ARRAY JOIN arrayConcat(
     arrayMap(k -> (k, 'bool'),   arrayFlatten(events.bool_attributes.key)),

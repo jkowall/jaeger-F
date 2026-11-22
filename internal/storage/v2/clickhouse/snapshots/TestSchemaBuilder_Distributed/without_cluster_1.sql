@@ -56,14 +56,18 @@ ORDER BY (service_name, name, toDateTime(start_time))
 
 -- services table
 CREATE TABLE
-    IF NOT EXISTS services (name String) ENGINE = AggregatingMergeTree
+    IF NOT EXISTS services (
+        name String,
+        last_seen SimpleAggregateFunction(max, DateTime64(9))
+    ) ENGINE = AggregatingMergeTree
 ORDER BY
-    (name);
+    (name)
 
 -- services materialized view
 CREATE MATERIALIZED VIEW IF NOT EXISTS services_mv TO services AS
 SELECT
-    service_name AS name
+    service_name AS name,
+    max(start_time) AS last_seen
 FROM
     spans
 GROUP BY
@@ -74,17 +78,19 @@ CREATE TABLE IF NOT EXISTS
     operations (
         service_name String,
         name String,
-        span_kind String
+        span_kind String,
+        last_seen SimpleAggregateFunction(max, DateTime64(9))
     ) ENGINE = AggregatingMergeTree
 ORDER BY
-    (service_name, span_kind);
+    (service_name, span_kind)
 
 -- operations materialized view
 CREATE MATERIALIZED VIEW IF NOT EXISTS operations_mv TO operations AS
 SELECT
     name,
     kind AS span_kind,
-    service_name
+    service_name,
+    start_time AS last_seen
 FROM
     spans;
 
@@ -114,7 +120,8 @@ CREATE TABLE
     IF NOT EXISTS attribute_metadata (
         attribute_key String,
         type String,  -- 'bool', 'double', 'int', 'str', 'bytes', 'map', 'slice'
-        level String  -- 'resource', 'scope', 'span'
+        level String,  -- 'resource', 'scope', 'span'
+        last_seen SimpleAggregateFunction(max, DateTime64(9))
     ) ENGINE = AggregatingMergeTree
 ORDER BY (attribute_key, type, level)
 
@@ -123,9 +130,11 @@ CREATE MATERIALIZED VIEW IF NOT EXISTS attribute_metadata_mv TO attribute_metada
 SELECT
     tp.1 AS attribute_key,
     tp.2 AS type,
-    tp.3 AS level
+    tp.3 AS level,
+    max(start_time) AS last_seen
 FROM (
     SELECT
+        start_time,
         arrayJoin(arrayConcat(
             arrayMap(k -> (k, 'bool',   'span'),     bool_attributes.key),
             arrayMap(k -> (k, 'bool',   'resource'), resource_bool_attributes.key),
@@ -181,7 +190,8 @@ CREATE MATERIALIZED VIEW IF NOT EXISTS event_attribute_metadata_mv TO attribute_
 SELECT
     tp.1 AS attribute_key,
     tp.2 AS type,
-    'event' AS level
+    'event' AS level,
+    max(start_time) AS last_seen
 FROM spans
 ARRAY JOIN arrayConcat(
     arrayMap(k -> (k, 'bool'),   arrayFlatten(events.bool_attributes.key)),
@@ -204,7 +214,8 @@ CREATE MATERIALIZED VIEW IF NOT EXISTS link_attribute_metadata_mv TO attribute_m
 SELECT
     tp.1 AS attribute_key,
     tp.2 AS type,
-    'link' AS level
+    'link' AS level,
+    max(start_time) AS last_seen
 FROM spans
 ARRAY JOIN arrayConcat(
     arrayMap(k -> (k, 'bool'),   arrayFlatten(links.bool_attributes.key)),

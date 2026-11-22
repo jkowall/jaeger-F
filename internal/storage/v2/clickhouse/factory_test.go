@@ -834,6 +834,29 @@ func TestCreateTraceIDTimestampsTableTemplate(t *testing.T) {
 	})
 }
 
+// TestCreateCatalogTablesTemplate checks that the tables the views fill with names from spans
+// expire a name with the spans that carried it.
+func TestCreateCatalogTablesTemplate(t *testing.T) {
+	tables := map[string]string{
+		"services table":           sql.CreateServicesTable,
+		"operations table":         sql.CreateOperationsTable,
+		"attribute metadata table": sql.CreateAttributeMetadataTable,
+	}
+	for name, tmpl := range tables {
+		t.Run(name+" without TTL", func(t *testing.T) {
+			query := schemaQuery(t, name)
+			assert.Contains(t, query, "last_seen SimpleAggregateFunction(max, DateTime64(9))")
+			assert.NotContains(t, query, "TTL last_seen")
+		})
+
+		t.Run(name+" with TTL", func(t *testing.T) {
+			query, err := loadTemplate(name, tmpl, schemaTemplateParams{TTLSeconds: 86400, AggregatingMergeTree: "AggregatingMergeTree"})
+			require.NoError(t, err)
+			assert.Contains(t, query, "TTL last_seen + INTERVAL 86400 SECOND DELETE")
+		})
+	}
+}
+
 // TestSchemaBuilder_Engines checks that every table the builder creates carries the ENGINE
 // clause the configured TableEngine renders, and that the materialized views carry none.
 func TestSchemaBuilder_Engines(t *testing.T) {

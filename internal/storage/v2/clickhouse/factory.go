@@ -42,7 +42,8 @@ var (
 // schemaTemplateParams is what the CREATE TABLE and materialized-view templates under
 // sql/ are rendered with.
 type schemaTemplateParams struct {
-	// TTLSeconds is the retention of spans and trace_id_timestamps; zero renders no TTL clause.
+	// TTLSeconds is the retention of spans and of every table filled from them; zero renders
+	// no TTL clause.
 	TTLSeconds int64
 	// MergeTree is the ENGINE clause body of the tables that hold raw rows.
 	MergeTree string

@@ -2,6 +2,7 @@ CREATE MATERIALIZED VIEW IF NOT EXISTS operations_mv TO operations{{ .LocalTable
 SELECT
     name,
     kind AS span_kind,
-    service_name
+    service_name,
+    start_time AS last_seen
 FROM
     spans{{ .LocalTableSuffix }};

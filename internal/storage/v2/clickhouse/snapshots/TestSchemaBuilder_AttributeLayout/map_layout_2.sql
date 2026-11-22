@@ -2,9 +2,11 @@ CREATE MATERIALIZED VIEW IF NOT EXISTS attribute_metadata_mv TO attribute_metada
 SELECT
     tp.1 AS attribute_key,
     tp.2 AS type,
-    tp.3 AS level
+    tp.3 AS level,
+    max(start_time) AS last_seen
 FROM (
     SELECT
+        start_time,
         arrayJoin(arrayConcat(
             arrayMap(k -> (k, 'bool',   'span'),     mapKeys(bool_attributes)),
             arrayMap(k -> (k, 'bool',   'resource'), mapKeys(resource_bool_attributes)),
