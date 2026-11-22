@@ -67,6 +67,33 @@ func TestInitHelperResourceError(t *testing.T) {
 	require.EqualError(t, err, fakeErr.Error())
 }
 
+func clearOTLPTargetEnv(t *testing.T) {
+	t.Helper()
+	for _, key := range otlpTargetEnv {
+		t.Setenv(key, "")
+	}
+}
+
+func TestExporterOptionsLoopbackDefault(t *testing.T) {
+	clearOTLPTargetEnv(t)
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "  ")
+	require.True(t, usesLoopbackDefault())
+	require.Len(t, GRPCOptions(), 2)
+	require.Len(t, HTTPOptions(), 2)
+}
+
+func TestExporterOptionsDeferToConfiguredTarget(t *testing.T) {
+	for _, key := range otlpTargetEnv {
+		t.Run(key, func(t *testing.T) {
+			clearOTLPTargetEnv(t)
+			t.Setenv(key, "configured")
+			require.False(t, usesLoopbackDefault())
+			require.Empty(t, GRPCOptions())
+			require.Empty(t, HTTPOptions())
+		})
+	}
+}
+
 func TestMain(m *testing.M) {
 	testutils.VerifyGoLeaks(m)
 }

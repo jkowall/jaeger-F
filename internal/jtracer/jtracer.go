@@ -13,6 +13,7 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -109,17 +110,68 @@ func otelResource(ctx context.Context, svc string) (*resource.Resource, error) {
 	)
 }
 
-func defaultGRPCOptions() []otlptracegrpc.Option {
-	var options []otlptracegrpc.Option
-	if !strings.HasPrefix(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"), "https://") && strings.ToLower(os.Getenv("OTEL_EXPORTER_OTLP_INSECURE")) != "false" {
-		options = append(options, otlptracegrpc.WithInsecure())
+const (
+	// loopbackGRPCEndpoint and loopbackHTTPEndpoint are the OTLP exporters'
+	// built-in default endpoints.
+	loopbackGRPCEndpoint = "localhost:4317"
+	loopbackHTTPEndpoint = "localhost:4318"
+)
+
+// otlpTargetEnv lists the variables through which an operator chooses where
+// OTLP traces are exported and how that connection is secured.
+var otlpTargetEnv = []string{
+	"OTEL_EXPORTER_OTLP_ENDPOINT",
+	"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+	"OTEL_EXPORTER_OTLP_INSECURE",
+	"OTEL_EXPORTER_OTLP_TRACES_INSECURE",
+	"OTEL_EXPORTER_OTLP_CERTIFICATE",
+	"OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE",
+	"OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE",
+	"OTEL_EXPORTER_OTLP_TRACES_CLIENT_CERTIFICATE",
+	"OTEL_EXPORTER_OTLP_CLIENT_KEY",
+	"OTEL_EXPORTER_OTLP_TRACES_CLIENT_KEY",
+}
+
+// usesLoopbackDefault reports whether none of otlpTargetEnv is set, matching
+// the exporters' own rule that a blank value counts as unset.
+func usesLoopbackDefault() bool {
+	for _, key := range otlpTargetEnv {
+		if strings.TrimSpace(os.Getenv(key)) != "" {
+			return false
+		}
 	}
-	return options
+	return true
+}
+
+// GRPCOptions returns the otlptracegrpc options Jaeger binaries pass to their
+// exporters. Any configured endpoint is left to the exporter's environment
+// handling, which uses TLS unless OTEL_EXPORTER_OTLP_[TRACES_]INSECURE is true
+// or the endpoint scheme is http. Plaintext is applied only together with the
+// loopback endpoint it was chosen for, when nothing is configured.
+func GRPCOptions() []otlptracegrpc.Option {
+	if !usesLoopbackDefault() {
+		return nil
+	}
+	return []otlptracegrpc.Option{
+		otlptracegrpc.WithEndpoint(loopbackGRPCEndpoint),
+		otlptracegrpc.WithInsecure(),
+	}
+}
+
+// HTTPOptions is the otlptracehttp counterpart of GRPCOptions.
+func HTTPOptions() []otlptracehttp.Option {
+	if !usesLoopbackDefault() {
+		return nil
+	}
+	return []otlptracehttp.Option{
+		otlptracehttp.WithEndpoint(loopbackHTTPEndpoint),
+		otlptracehttp.WithInsecure(),
+	}
 }
 
 func otelExporter(ctx context.Context) (sdktrace.SpanExporter, error) {
 	client := otlptracegrpc.NewClient(
-		defaultGRPCOptions()...,
+		GRPCOptions()...,
 	)
 	return otlptrace.New(ctx, client)
 }

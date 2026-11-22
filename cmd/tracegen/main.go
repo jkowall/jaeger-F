@@ -24,6 +24,7 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 
+	"github.com/jaegertracing/jaeger/internal/jtracer"
 	"github.com/jaegertracing/jaeger/internal/telemetry/otelsemconv"
 	"github.com/jaegertracing/jaeger/internal/tracegen"
 	"github.com/jaegertracing/jaeger/internal/version"
@@ -130,12 +131,12 @@ func createOtelExporter(exporterType string) (sdktrace.SpanExporter, error) {
 		return nil, errors.New("jaeger exporter is no longer supported, please use otlp")
 	case "otlp", "otlp-http":
 		client := otlptracehttp.NewClient(
-			otlptracehttp.WithInsecure(),
+			jtracer.HTTPOptions()...,
 		)
 		exporter, err = otlptrace.New(context.Background(), client)
 	case "otlp-grpc":
 		client := otlptracegrpc.NewClient(
-			otlptracegrpc.WithInsecure(),
+			jtracer.GRPCOptions()...,
 		)
 		exporter, err = otlptrace.New(context.Background(), client)
 	case "stdout":
