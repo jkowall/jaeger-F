@@ -17,6 +17,7 @@ func TestCreateDefaultConfig(t *testing.T) {
 	cfg := createDefaultConfig().(*Config)
 	require.NotNil(t, cfg, "failed to create default config")
 	require.NoError(t, componenttest.CheckConfigStruct(cfg))
+	assert.Equal(t, "localhost:27777", cfg.NetAddr.Endpoint)
 }
 
 func TestCreateExtension(t *testing.T) {
