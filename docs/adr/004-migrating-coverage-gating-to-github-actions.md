@@ -1,7 +1,7 @@
 # Migrate Coverage Gating from Codecov to GitHub Actions
 
 * **Status**: Accepted (implemented)
-* **Date**: 2026-03-01, extended 2026-07-29 (binary coverage, upload-invariant check, Codecov follow-up resolved), extended 2026-08-19 (the in-run summary check is the required context), extended 2026-09-05 (the unit-test leg collects counters instead of a text profile; all coverage artifacts moved under `.cover/`)
+* **Date**: 2026-03-01, extended 2026-07-29 (binary coverage, upload-invariant check, Codecov follow-up resolved), extended 2026-08-19 (the in-run summary check is the required context), extended 2026-09-05 (the unit-test leg collects counters instead of a text profile; all coverage artifacts moved under `.cover/`), extended 2026-11-22 (both gates are scored from raw artifacts by default-branch code; the summary artifact carries no verdict)
 
 ## Context
 
@@ -60,8 +60,8 @@ The single `summary-report` job:
 1. **Resolves the source run** — determines the CI Orchestrator run ID (from `workflow_run` event or `workflow_dispatch` input), validates it succeeded, and extracts PR metadata (number + head SHA) via the GitHub API.
 2. **Downloads all artifacts** — uses `gh run download` to fetch all artifacts from the source run.
 3. **Checks the upload invariant** — `scripts/e2e/check_coverage_uploads.py` verifies that `after_n_builds` in `.codecov.yml` equals the number of uploads carrying countable coverage, and fails the run when at least that many jobs uploaded yet fewer carry coverage. Codecov withholds *every* notification — including the required `codecov/patch` and `codecov/project` statuses — until the threshold is met, so drift in that number blocks all merges with no failing check to point at. The check verifies uploads *carry coverage* rather than counting upload call sites: when this last drifted, the number of call sites stayed at 27 and only the content of 15 of them changed.
-4. **Merges and gates coverage** — merges all `coverage-*/*.out` profiles with `gocovmerge`, filters excluded paths, and applies the two coverage gates.
-5. **Fails the run on a blocking verdict** — exits 1 when the coverage gate failed or the metrics comparison hit an infrastructure error, which is what gates the merge (see *Where the gating happens* below). It also writes the two verdicts to a `ci-summary` artifact, from which `ci-summary-report-publish.yml` posts the sticky PR comment and the two advisory per-gate check runs.
+4. **Merges and gates coverage** — merges all `coverage-*/*.out` profiles with `.github/scripts/coverage-profile.js`, filters excluded paths, and applies the two coverage gates. The job checks out the default branch rather than the commit under test, so these tools are never the pull request's own; the profile is scored without reading Go sources, which is what makes that checkout sufficient.
+5. **Fails the run on a blocking verdict** — exits 1 when the coverage gate failed or the metrics comparison hit an infrastructure error, which is what gates the merge (see *Where the gating happens* below). It also writes display data (the metric change count and per-snapshot changes) to a `ci-summary` artifact. `ci-summary-report-publish.yml` posts the sticky PR comment and the two advisory per-gate check runs, scoring both itself (see *Trust boundary* below).
 6. **Saves baseline on `main`** — caches the coverage percentage for future PR comparisons.
 
 ### Key Files
@@ -73,7 +73,8 @@ The single `summary-report` job:
 | `.github/actions/upload-codecov/action.yml` | Coverage artifact upload |
 | `.github/workflows/ci-orchestrator.yml` | Triggers the fan-in |
 | `scripts/e2e/filter_coverage.py` | Applies `.codecov.yml` exclusions |
-| `internal/tools/tools.go` | `gocovmerge` tool dependency |
+| `.github/scripts/coverage-profile.js` | Profile merge and scoring for both the fan-in job and the publish workflow |
+| `internal/tools/tools.go` | `gocovmerge` tool dependency (e2e leg merges) |
 | `.codecov.yml` | Single source of truth for ignore patterns, and the `after_n_builds` upload threshold |
 | `scripts/e2e/check_coverage_uploads.py` | Upload-invariant check |
 | `scripts/makefiles/IntegrationTests.mk` | Instrumented e2e binary build and coverage merge |
@@ -89,6 +90,10 @@ Requiring them is what breaks. Both are created out of band: `workflow_run` puts
 
 Gating on the fan-in job means it fails closed. An infrastructure failure inside it — the artifact download, `check_coverage_uploads.py` — blocks merges, where the same failure previously only reddened a check that nothing required.
 
+### Trust boundary
+
+On a fork pull request the fan-in job runs the fork's workflow, so nothing it writes can decide a check that the privileged publish workflow creates. The publish workflow therefore downloads the run's `coverage-*`, `metrics_snapshot_*`, and `diff_metrics_snapshot_*` artifacts, merges and filters the profiles with its own default-branch checkout, restores the baseline from the `main` cache scope, and decides `Coverage Gate` (floor and baseline) and `Metrics Comparison` (every snapshot has a diff) from those. Only `ci-summary.json` is taken from the `ci-summary` artifact, and only its metric change count and snapshot list are read, as display data. A missing profile fails the gate rather than skipping it. The profiles themselves are produced by running the pull request's tests, as are Codecov's uploads.
+
 ## Consequences
 
 ### Positive
@@ -96,7 +101,7 @@ Gating on the fan-in job means it fails closed. An infrastructure failure inside
 - **Faster feedback**: coverage gate result appears as soon as the CI Orchestrator completes.
 - **Reliability**: eliminates Codecov rate-limit failures blocking PRs.
 - **Consolidated reporting**: performance metrics and coverage appear in a single sticky PR comment.
-- **Always reported**: `Coverage Gate` is always created, even when coverage is skipped.
+- **Always reported**: `Coverage Gate` is always created; when no profile was uploaded it is created as a failure.
 
 ### Negative
 
