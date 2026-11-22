@@ -11,7 +11,9 @@ const {
   safeNum,
   sanitizeMetricName,
   sanitizeSnapshots,
+  inspectMetricsArtifacts,
   computeMetrics,
+  readCoverageInputs,
   computeCoverage,
   formatMetricsDetail,
   buildCommentBody,
@@ -222,9 +224,32 @@ describe('sanitizeSnapshots', () => {
 
 // ── computeMetrics ────────────────────────────────────────────────────────────
 
+describe('inspectMetricsArtifacts', () => {
+  const dir = name => ({ name, isDirectory: () => true });
+  const file = name => ({ name, isDirectory: () => false });
+
+  test('counts snapshots and the ones without a diff directory', () => {
+    const readdirSync = jest.fn(() => [
+      dir('metrics_snapshot_a'), dir('diff_metrics_snapshot_a'),
+      dir('metrics_snapshot_b'),
+      file('diff_metrics_snapshot_b'),
+      dir('coverage-unittests'),
+    ]);
+    expect(inspectMetricsArtifacts({ readdirSync })).toEqual({ snapshotCount: 2, missingDiffCount: 1 });
+    expect(readdirSync).toHaveBeenCalledWith('.artifacts', { withFileTypes: true });
+  });
+
+  test('reports no snapshots when the artifacts directory cannot be read', () => {
+    const readdirSync = jest.fn(() => { throw new Error('ENOENT'); });
+    expect(inspectMetricsArtifacts({ readdirSync })).toEqual({ snapshotCount: 0, missingDiffCount: 0 });
+  });
+});
+
 describe('computeMetrics', () => {
+  const clean = { snapshotCount: 2, missingDiffCount: 0 };
+
   test('success when no changes and no infra errors', () => {
-    const r = computeMetrics({ metrics_has_infra_errors: false, metrics_total_changes: 0 });
+    const r = computeMetrics({ metrics_total_changes: 0 }, clean);
     expect(r.conclusion).toBe('success');
     expect(r.text).toBe('✅ No significant metric changes');
     expect(r.totalChanges).toBe(0);
@@ -233,60 +258,64 @@ describe('computeMetrics', () => {
   });
 
   test('success with warning text when total changes > 0', () => {
-    const r = computeMetrics({ metrics_has_infra_errors: false, metrics_total_changes: 3 });
+    const r = computeMetrics({ metrics_total_changes: 3 }, clean);
     expect(r.conclusion).toBe('success');
     expect(r.text).toBe('⚠️ 3 metric change(s) detected (informational)');
     expect(r.totalChanges).toBe(3);
   });
 
-  test('failure when infra errors present', () => {
-    const r = computeMetrics({ metrics_has_infra_errors: true, metrics_total_changes: 0 });
+  test('failure when a snapshot has no diff artifact', () => {
+    const r = computeMetrics({ metrics_total_changes: 0 }, { snapshotCount: 2, missingDiffCount: 1 });
     expect(r.conclusion).toBe('failure');
-    expect(r.text).toBe('❌ Infrastructure error: missing diff artifacts');
+    expect(r.text).toBe('❌ Infrastructure error: 1 snapshot(s) missing diff artifacts');
     expect(r.hasInfraErrors).toBe(true);
   });
 
-  test('failure when total_changes is null (step did not write output)', () => {
-    const r = computeMetrics({ metrics_has_infra_errors: false, metrics_total_changes: null });
-    expect(r.conclusion).toBe('failure');
-    expect(r.text).toBe('❌ Could not read metrics_total_changes from summary');
+  test('a missing change count is informational, not a failure', () => {
+    const r = computeMetrics({ metrics_total_changes: null }, clean);
+    expect(r.conclusion).toBe('success');
+    expect(r.text).toBe('⚠️ Could not read the metric change count from the summary (informational)');
     expect(r.totalChanges).toBeNull();
   });
 
   test('infra errors take precedence over missing total_changes', () => {
-    const r = computeMetrics({ metrics_has_infra_errors: true, metrics_total_changes: null });
+    const r = computeMetrics({ metrics_total_changes: null }, { snapshotCount: 0, missingDiffCount: 0 });
     expect(r.conclusion).toBe('failure');
-    expect(r.text).toBe('❌ Infrastructure error: missing diff artifacts');
+    expect(r.text).toBe('❌ Infrastructure error: no metrics snapshot artifacts found');
   });
 
-  // Ensure JSON string "false" / "true" are not coerced as booleans
-  test('treats string "true" for metrics_has_infra_errors as falsy (not === true)', () => {
-    const r = computeMetrics({ metrics_has_infra_errors: 'true', metrics_total_changes: 0 });
+  test('ignores an infra-error verdict in the artifact when every snapshot has a diff', () => {
+    const r = computeMetrics({
+      metrics_has_infra_errors: true, metrics_conclusion: 'failure', metrics_total_changes: 0,
+    }, clean);
     expect(r.hasInfraErrors).toBe(false);
+    expect(r.conclusion).toBe('success');
   });
 
-  test('treats string "false" for metrics_has_infra_errors as falsy', () => {
-    const r = computeMetrics({ metrics_has_infra_errors: 'false', metrics_total_changes: 0 });
-    expect(r.hasInfraErrors).toBe(false);
+  test('a success verdict in the artifact does not pass without snapshot artifacts', () => {
+    const r = computeMetrics({
+      metrics_has_infra_errors: false, metrics_conclusion: 'success', metrics_total_changes: 0,
+    });
+    expect(r.hasInfraErrors).toBe(true);
+    expect(r.conclusion).toBe('failure');
   });
 
   test('includes sanitized snapshots when present', () => {
     const r = computeMetrics({
-      metrics_has_infra_errors: false,
       metrics_total_changes: 2,
       metrics_snapshots: [{
         snapshot: 'cassandra_v2',
         added: 1, removed: 1, modified: 0,
         metric_names: ['http_server_duration', 'rpc_client_duration'],
       }],
-    });
+    }, clean);
     expect(r.snapshots).toHaveLength(1);
     expect(r.snapshots[0].snapshot).toBe('cassandra_v2');
     expect(r.snapshots[0].metric_names).toEqual(['http_server_duration', 'rpc_client_duration']);
   });
 
   test('returns null snapshots when metrics_snapshots is absent', () => {
-    const r = computeMetrics({ metrics_has_infra_errors: false, metrics_total_changes: 0 });
+    const r = computeMetrics({ metrics_total_changes: 0 }, clean);
     expect(r.snapshots).toBeNull();
   });
 });
@@ -380,72 +409,172 @@ describe('formatMetricsDetail', () => {
 
 // ── computeCoverage ───────────────────────────────────────────────────────────
 
+describe('coverage-profile', () => {
+  const {
+    parseProfile, mergeProfiles, coveragePercent, findProfiles, main,
+  } = require('./coverage-profile');
+  const A = 'github.com/x/y/a.go';
+
+  test('scores statements, not blocks, and rounds to one decimal', () => {
+    const text = `mode: atomic\n${A}:1.1,2.2 2 5\n${A}:3.1,4.2 1 0\n`;
+    expect(coveragePercent(text)).toBe(66.7);
+  });
+
+  test('a block listed twice is counted once and covered if either count is set', () => {
+    const text = `mode: atomic\n${A}:1.1,2.2 3 0\n${A}:1.1,2.2 3 4\n${A}:3.1,4.2 1 0\n`;
+    expect(coveragePercent(text)).toBe(75);
+  });
+
+  test.each([
+    ['no mode line', `${A}:1.1,2.2 1 1\n`],
+    ['an unknown mode', `mode: fake\n${A}:1.1,2.2 1 1\n`],
+    ['a malformed block', `mode: set\n${A}:1.1,2.2 1\n`],
+    ['a non-Go file', 'mode: set\nx/a.txt:1.1,2.2 1 1\n'],
+    ['conflicting statement counts', `mode: set\n${A}:1.1,2.2 1 1\n${A}:1.1,2.2 2 1\n`],
+    ['no statements', 'mode: set\n'],
+  ])('returns null for %s', (_name, text) => {
+    expect(coveragePercent(text)).toBeNull();
+  });
+
+  test('merges profiles of one mode and refuses mixed modes', () => {
+    const a = parseProfile(`mode: atomic\n${A}:1.1,2.2 2 1\n`);
+    const b = parseProfile(`mode: atomic\n${A}:1.1,2.2 2 2\n${A}:3.1,4.2 1 0\n`);
+    expect(mergeProfiles([a, b])).toBe(`mode: atomic\n${A}:1.1,2.2 2 3\n${A}:3.1,4.2 1 0\n`);
+    expect(mergeProfiles([a, parseProfile(`mode: set\n${A}:1.1,2.2 2 1\n`)])).toBeNull();
+    expect(mergeProfiles([])).toBeNull();
+  });
+
+  test('CLI merges coverage-*/*.out regular files and scores the result', () => {
+    const dir = fs.mkdtempSync(path.join(require('os').tmpdir(), 'cov-'));
+    fs.mkdirSync(path.join(dir, 'coverage-unit'));
+    fs.mkdirSync(path.join(dir, 'nested', 'coverage-e2e'), { recursive: true });
+    fs.mkdirSync(path.join(dir, 'metrics_snapshot_x'));
+    fs.writeFileSync(path.join(dir, 'coverage-unit', 'cover.out'), `mode: atomic\n${A}:1.1,2.2 1 1\n`);
+    fs.writeFileSync(path.join(dir, 'nested', 'coverage-e2e', 'cover.out'), `mode: atomic\n${A}:3.1,4.2 1 0\n`);
+    fs.writeFileSync(path.join(dir, 'metrics_snapshot_x', 'cover.out'), `mode: atomic\n${A}:5.1,6.2 9 9\n`);
+    fs.symlinkSync(path.join(dir, 'metrics_snapshot_x', 'cover.out'), path.join(dir, 'coverage-unit', 'link.out'));
+    expect(findProfiles(fs, dir)).toHaveLength(2);
+
+    const out = path.join(dir, 'merged.out');
+    const log = jest.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      expect(main(['merge', dir, out], fs)).toBe(0);
+      expect(main(['percent', out], fs)).toBe(0);
+      expect(log).toHaveBeenLastCalledWith('50');
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  test('CLI merge fails and leaves no output when there are no profiles or one is malformed', () => {
+    const dir = fs.mkdtempSync(path.join(require('os').tmpdir(), 'cov-'));
+    const out = path.join(dir, 'merged.out');
+    fs.writeFileSync(out, 'stale');
+    const log = jest.spyOn(console, 'log').mockImplementation(() => {});
+    const err = jest.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      expect(main(['merge', dir, out], fs)).toBe(1);
+      expect(fs.existsSync(out)).toBe(false);
+      fs.mkdirSync(path.join(dir, 'coverage-unit'));
+      fs.writeFileSync(path.join(dir, 'coverage-unit', 'cover.out'), 'not a profile');
+      expect(main(['merge', dir, out], fs)).toBe(1);
+      expect(fs.existsSync(out)).toBe(false);
+      fs.writeFileSync(path.join(dir, 'coverage-unit', 'cover.out'), `mode: atomic\n${A}:1.1,2.2 1 1\n`);
+      fs.writeFileSync(path.join(dir, 'coverage-unit', 'set.out'), `mode: set\n${A}:1.1,2.2 1 1\n`);
+      expect(main(['merge', dir, out], fs)).toBe(1);
+      expect(main(['percent', out], fs)).toBe(1);
+      expect(main(['bogus'], fs)).toBe(2);
+      for (const line of log.mock.calls.flat()) expect(line).not.toContain(dir);
+    } finally {
+      log.mockRestore();
+      err.mockRestore();
+    }
+  });
+});
+
+describe('readCoverageInputs', () => {
+  const PROFILE = 'mode: atomic\ngithub.com/x/y/a.go:1.1,2.2 1 1\n';
+  const filesFs = files => ({
+    readFileSync: jest.fn((name) => {
+      if (name in files) return files[name];
+      throw new Error('ENOENT');
+    }),
+  });
+
+  test('scores the merged profile and reads the baseline', () => {
+    const r = readCoverageInputs(filesFs({
+      '.artifacts/merged-coverage.out': PROFILE,
+      '.artifacts/baseline-coverage.txt': '96.5\n',
+    }));
+    expect(r).toEqual({ percentage: 100, baseline: 96.5, baselineInvalid: false });
+  });
+
+  test('a missing profile and baseline read as null', () => {
+    expect(readCoverageInputs(filesFs({}))).toEqual({ percentage: null, baseline: null, baselineInvalid: false });
+  });
+
+  test.each(['', '  \n', 'abc', '-1', '1e3'])('flags baseline %j as invalid', (raw) => {
+    const r = readCoverageInputs(filesFs({
+      '.artifacts/merged-coverage.out': PROFILE,
+      '.artifacts/baseline-coverage.txt': raw,
+    }));
+    expect(r.baselineInvalid).toBe(true);
+    expect(r.baseline).toBeNull();
+  });
+});
+
 describe('computeCoverage', () => {
   test('success with pct and baseline', () => {
-    const r = computeCoverage({
-      coverage_skipped: false,
-      coverage_conclusion: 'success',
-      coverage_percentage: 96.8,
-      coverage_baseline: 46.4,
-    });
+    const r = computeCoverage({ percentage: 96.8, baseline: 46.4 });
     expect(r.conclusion).toBe('success');
-    expect(r.skipped).toBe(false);
     expect(r.text).toBe('✅ Coverage 96.8% (baseline 46.4%)');
   });
 
-  test('failure when conclusion is failure', () => {
-    const r = computeCoverage({
-      coverage_skipped: false,
-      coverage_conclusion: 'failure',
-      coverage_percentage: 94.0,
-      coverage_baseline: 96.0,
-    });
+  test('failure below the floor and the baseline', () => {
+    const r = computeCoverage({ percentage: 94.0, baseline: 96.0 });
     expect(r.conclusion).toBe('failure');
     expect(r.text).toBe('❌ Coverage 94% (baseline 96%)');
   });
 
-  test('skipped when coverage_skipped is true', () => {
-    const r = computeCoverage({ coverage_skipped: true, coverage_conclusion: 'success' });
-    expect(r.skipped).toBe(true);
-    expect(r.conclusion).toBe('success');
-    expect(r.text).toBe('⏭️ No coverage profiles found; coverage gate skipped.');
+  test('failure when coverage dropped below the baseline but stays above the floor', () => {
+    const r = computeCoverage({ percentage: 96.0, baseline: 96.5 });
+    expect(r.conclusion).toBe('failure');
+    expect(r.text).toBe('❌ Coverage 96% (baseline 96.5%)');
   });
 
-  test('skipped when coverage_conclusion is "skipped"', () => {
-    const r = computeCoverage({ coverage_skipped: false, coverage_conclusion: 'skipped' });
-    expect(r.skipped).toBe(true);
-    expect(r.conclusion).toBe('success');
+  test('a missing profile fails the gate', () => {
+    const r = computeCoverage({ percentage: null, baseline: null });
+    expect(r.conclusion).toBe('failure');
+    expect(r.text).toBe('❌ No readable coverage profile; coverage gate failed.');
   });
 
-  test('shows "unknown" pct when percentage is null', () => {
+  test('skipped or success fields from an artifact cannot pass the gate', () => {
     const r = computeCoverage({
-      coverage_skipped: false,
-      coverage_conclusion: 'failure',
-      coverage_percentage: null,
-      coverage_baseline: null,
+      coverage_skipped: true,
+      coverage_conclusion: 'success',
+      coverage_percentage: 99.0,
+      percentage: null,
+      baseline: null,
     });
-    expect(r.text).toBe('❌ Coverage unknown (no baseline)');
+    expect(r.conclusion).toBe('failure');
   });
 
   test('shows "no baseline" when baseline is null but pct is known', () => {
-    const r = computeCoverage({
-      coverage_skipped: false,
-      coverage_conclusion: 'success',
-      coverage_percentage: 97.0,
-      coverage_baseline: null,
-    });
+    const r = computeCoverage({ percentage: 97.0, baseline: null });
+    expect(r.conclusion).toBe('success');
     expect(r.text).toBe('✅ Coverage 97% (no baseline)');
   });
 
-  // Ensure JSON string "false" is not coerced as boolean true
-  test('treats string "true" for coverage_skipped as not skipped', () => {
-    const r = computeCoverage({
-      coverage_skipped: 'true',
-      coverage_conclusion: 'success',
-      coverage_percentage: 97.0,
-      coverage_baseline: 96.0,
-    });
-    expect(r.skipped).toBe(false);
+  test('failure below the floor without a baseline', () => {
+    const r = computeCoverage({ percentage: 94.9, baseline: null });
+    expect(r.conclusion).toBe('failure');
+    expect(r.text).toBe('❌ Coverage 94.9% (no baseline)');
+  });
+
+  test('failure when the baseline file is unreadable', () => {
+    const r = computeCoverage({ percentage: 97.0, baseline: null, baselineInvalid: true });
+    expect(r.conclusion).toBe('failure');
+    expect(r.text).toBe('❌ Coverage 97% (baseline file unreadable)');
   });
 });
 

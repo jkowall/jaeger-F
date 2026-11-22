@@ -16,24 +16,37 @@
 // The artifact never chooses where results are written: resolvePublishTarget()
 // takes the commit and PR from the CI run as reported by GitHub.
 //
+// The artifact never chooses a check conclusion either. On a fork PR the job
+// that writes it runs the fork's workflow, so any verdict it records is the
+// fork's. Coverage Gate is scored here from the merged coverage profile and the
+// main-branch baseline, which the publish workflow prepares with default-branch
+// code; Metrics Comparison is decided here from the downloaded snapshot and
+// diff artifacts. ci-summary.json only supplies display data: the metric change
+// count and the per-snapshot change list.
+//
 // Required invariants maintained by this file:
-//   1. ci-summary.json contains ONLY typed primitives: numbers, booleans, and
-//      fixed enum strings ("success"/"failure"/"skipped"). No free-form text.
-//      Any other field, including pr_number or head_sha from an older
-//      artifact, is ignored.
+//   1. Only metrics_total_changes and metrics_snapshots are read from
+//      ci-summary.json. Any other field, including pr_number, head_sha, or a
+//      conclusion from an older artifact, is ignored.
 //   2. All display text (PR comments, check summaries) is constructed entirely
 //      from trusted template strings defined in this file.
 //   3. Numeric values are coerced through safeNum() which validates with
 //      Number.isFinite() and rejects negatives.
-//   4. Boolean fields are compared with === true, never coerced with !! which
-//      would misinterpret a JSON string "false" as truthy.
-//   5. String fields from the artifact are used only in comparisons
-//      (=== 'success'), never interpolated into output strings.
+//   4. No artifact field decides a check conclusion.
+//   5. Snapshot and metric names from the artifact appear in output only after
+//      sanitizeSnapshots() validates them against fixed character sets.
 
 'use strict';
 
+const { coveragePercent } = require('./coverage-profile');
+
 // HTML comment tag used to identify the CI summary comment on a PR.
 const COMMENT_TAG = '<!-- ci-summary-report -->';
+
+const ARTIFACTS_DIR = '.artifacts';
+// Must match MINIMUM in the coverage gate step of ci-summary-report.yml.
+const COVERAGE_MINIMUM = 95.0;
+const DECIMAL_RE = /^\d+(\.\d+)?$/;
 
 /**
  * Coerce a value from ci-summary.json to a non-negative number, or null.
@@ -114,24 +127,47 @@ function sanitizeSnapshots(raw) {
 }
 
 /**
- * Derive metrics conclusion and display text from the parsed ci-summary artifact.
- * Uses === true for boolean fields to avoid misinterpreting JSON strings.
+ * Count the metrics snapshot artifacts the CI run uploaded and how many of them
+ * have no diff artifact, the same 1-to-1 rule metrics_summary.sh applies.
+ * @param {object} fs
+ * @returns {{ snapshotCount: number, missingDiffCount: number }}
+ */
+function inspectMetricsArtifacts(fs) {
+  let entries = [];
+  try {
+    entries = fs.readdirSync(ARTIFACTS_DIR, { withFileTypes: true });
+  } catch {
+    // No artifacts directory: no snapshots.
+  }
+  const dirs = new Set(entries.filter(e => e.isDirectory()).map(e => e.name));
+  const snapshots = [...dirs].filter(name => name.startsWith('metrics_snapshot_'));
+  const missingDiffCount = snapshots.filter(name => !dirs.has(`diff_${name}`)).length;
+  return { snapshotCount: snapshots.length, missingDiffCount };
+}
+
+/**
+ * Derive metrics conclusion and display text.
+ * The conclusion comes only from the artifact inventory; the change count and
+ * snapshot list come from ci-summary.json and are display data.
  * @param {object} s - Parsed ci-summary.json
+ * @param {{ snapshotCount: number, missingDiffCount: number }} inventory - from inspectMetricsArtifacts
  * @returns {{ hasInfraErrors: boolean, totalChanges: number|null, snapshots: Array|null, conclusion: string, text: string }}
  */
-function computeMetrics(s) {
-  const hasInfraErrors = s.metrics_has_infra_errors === true;
+function computeMetrics(s, { snapshotCount = 0, missingDiffCount = 0 } = {}) {
+  const hasInfraErrors = !(snapshotCount > 0) || missingDiffCount !== 0;
   const totalChanges   = safeNum(s.metrics_total_changes);
   const snapshots      = sanitizeSnapshots(s.metrics_snapshots);
   // Metric diffs are informational on PRs because the snapshot set can include
-  // nondeterministic runtime series. Infra/reporting failures still block.
-  const conclusion     = (hasInfraErrors || totalChanges === null) ? 'failure' : 'success';
+  // nondeterministic runtime series. Missing diff artifacts still block.
+  const conclusion     = hasInfraErrors ? 'failure' : 'success';
 
   let text;
   if (hasInfraErrors) {
-    text = '❌ Infrastructure error: missing diff artifacts';
+    text = snapshotCount > 0
+      ? `❌ Infrastructure error: ${missingDiffCount} snapshot(s) missing diff artifacts`
+      : '❌ Infrastructure error: no metrics snapshot artifacts found';
   } else if (totalChanges === null) {
-    text = '❌ Could not read metrics_total_changes from summary';
+    text = '⚠️ Could not read the metric change count from the summary (informational)';
   } else if (totalChanges > 0) {
     text = `⚠️ ${totalChanges} metric change(s) detected (informational)`;
   } else {
@@ -141,28 +177,51 @@ function computeMetrics(s) {
   return { hasInfraErrors, totalChanges, snapshots, conclusion, text };
 }
 
-/**
- * Derive coverage conclusion and display text from the parsed ci-summary artifact.
- * @param {object} s - Parsed ci-summary.json
- * @returns {{ skipped: boolean, conclusion: string, text: string }}
- */
-function computeCoverage(s) {
-  const skipped    = s.coverage_skipped === true || s.coverage_conclusion === 'skipped';
-  const conclusion = (skipped || s.coverage_conclusion === 'success') ? 'success' : 'failure';
-  const pct        = safeNum(s.coverage_percentage);
-  const baseline   = safeNum(s.coverage_baseline);
-
-  let text;
-  if (skipped) {
-    text = '⏭️ No coverage profiles found; coverage gate skipped.';
-  } else {
-    const pctStr      = pct      !== null ? `${pct}%`      : 'unknown';
-    const baselineStr = baseline !== null ? ` (baseline ${baseline}%)` : ' (no baseline)';
-    const icon        = conclusion === 'success' ? '✅' : '❌';
-    text              = `${icon} Coverage ${pctStr}${baselineStr}`;
+function readOptionalFile(fs, file) {
+  try {
+    return fs.readFileSync(file, 'utf8');
+  } catch {
+    return null;
   }
+}
 
-  return { skipped, conclusion, text };
+/**
+ * Read the coverage gate inputs the publish workflow prepared: the merged,
+ * filtered profile and, when one was restored, the main-branch baseline.
+ * @param {object} fs
+ * @returns {{ percentage: number|null, baseline: number|null, baselineInvalid: boolean }}
+ */
+function readCoverageInputs(fs) {
+  const profile = readOptionalFile(fs, `${ARTIFACTS_DIR}/merged-coverage.out`);
+  const percentage = profile === null ? null : coveragePercent(profile);
+  const rawBaseline = readOptionalFile(fs, `${ARTIFACTS_DIR}/baseline-coverage.txt`);
+  if (rawBaseline === null) return { percentage, baseline: null, baselineInvalid: false };
+  const trimmed = rawBaseline.trim();
+  if (!DECIMAL_RE.test(trimmed)) return { percentage, baseline: null, baselineInvalid: true };
+  return { percentage, baseline: Number(trimmed), baselineInvalid: false };
+}
+
+/**
+ * Apply the coverage gates (absolute floor, then no regression against the
+ * baseline) and derive the display text. A missing profile fails the gate.
+ * @param {{ percentage: number|null, baseline: number|null, baselineInvalid?: boolean }} inputs
+ * @returns {{ conclusion: string, text: string }}
+ */
+function computeCoverage({ percentage, baseline, baselineInvalid = false }) {
+  const pct  = safeNum(percentage);
+  const base = safeNum(baseline);
+
+  if (pct === null) {
+    return { conclusion: 'failure', text: '❌ No readable coverage profile; coverage gate failed.' };
+  }
+  const passes     = pct >= COVERAGE_MINIMUM && !baselineInvalid && (base === null || pct >= base);
+  const conclusion = passes ? 'success' : 'failure';
+  let baselineStr;
+  if (baselineInvalid) baselineStr = ' (baseline file unreadable)';
+  else if (base !== null) baselineStr = ` (baseline ${base}%)`;
+  else baselineStr = ' (no baseline)';
+  const icon = passes ? '✅' : '❌';
+  return { conclusion, text: `${icon} Coverage ${pct}%${baselineStr}` };
 }
 
 /**
@@ -413,8 +472,8 @@ async function handler({ github, core, context, fs }) {
   const footer     = `${links}\n_${ts}_`;
   const artifactUrlPrefix = `${ciRunUrl}/artifacts`;
 
-  // Read structured data written by ci-summary-report.yml.
-  // All fields are primitives (enums, numbers, booleans) — no free-form text.
+  // Read structured data written by ci-summary-report.yml. Display data only;
+  // conclusions are computed from the artifacts below.
   const s = readSummaryArtifact(fs);
   if (!s) {
     // Fixed text only: JSON.parse error messages quote the file contents.
@@ -428,8 +487,8 @@ async function handler({ github, core, context, fs }) {
     return;
   }
 
-  const metrics  = computeMetrics(s);
-  const coverage = computeCoverage(s);
+  const metrics  = computeMetrics(s, inspectMetricsArtifacts(fs));
+  const coverage = computeCoverage(readCoverageInputs(fs));
 
   await postCheckRun(github, owner, repo, headSha, 'Metrics Comparison', metrics.conclusion, {
     title:   'Metrics Comparison Result',
@@ -465,7 +524,9 @@ module.exports = handler;
 module.exports.safeNum              = safeNum;
 module.exports.sanitizeMetricName   = sanitizeMetricName;
 module.exports.sanitizeSnapshots    = sanitizeSnapshots;
+module.exports.inspectMetricsArtifacts = inspectMetricsArtifacts;
 module.exports.computeMetrics       = computeMetrics;
+module.exports.readCoverageInputs   = readCoverageInputs;
 module.exports.computeCoverage      = computeCoverage;
 module.exports.formatMetricsDetail  = formatMetricsDetail;
 module.exports.buildCommentBody     = buildCommentBody;
