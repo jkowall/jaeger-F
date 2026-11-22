@@ -26,7 +26,7 @@ func (s *MemStorageIntegrationTestSuite) initialize(t *testing.T) {
 	telset := telemetry.NoopSettings()
 	telset.Logger = s.logger
 
-	f, err := memory.NewFactory(memory.Configuration{MaxTraces: 10000}, telset)
+	f, err := memory.NewFactory(memory.Configuration{MaxTraces: 10000, MaxSpansPerTrace: largeTraceSpanCount}, telset)
 	require.NoError(t, err)
 	traceReader, err := f.CreateTraceReader()
 	require.NoError(t, err)

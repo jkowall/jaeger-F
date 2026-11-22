@@ -40,6 +40,8 @@ type traceAndId struct {
 	trace     ptrace.Traces
 	startTime time.Time
 	endTime   time.Time
+	spans     int // number of spans in trace
+	bytes     int // protobuf-encoded size of trace
 }
 
 // matchedSpan is a matching span with its resource and scope.
@@ -77,7 +79,18 @@ func newTenant(cfg *Configuration) *Tenant {
 func (t *Tenant) storeTraces(tracesById map[pcommon.TraceID]ptrace.ResourceSpansSlice) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	maxSpans, maxBytes := t.config.maxSpansPerTrace(), t.config.maxBytesPerTrace()
 	for traceId, sameTraceIDResourceSpan := range tracesById {
+		index, exists := t.ids[traceId]
+		spanBudget, byteBudget := maxSpans, maxBytes
+		if exists {
+			spanBudget -= t.traces[index].spans
+			byteBudget -= t.traces[index].bytes
+		}
+		spans, size := trimToBudget(sameTraceIDResourceSpan, spanBudget, byteBudget)
+		if spans == 0 {
+			continue
+		}
 		var startTime time.Time
 		var endTime time.Time
 		for _, resourceSpan := range sameTraceIDResourceSpan.All() {
@@ -106,8 +119,10 @@ func (t *Tenant) storeTraces(tracesById map[pcommon.TraceID]ptrace.ResourceSpans
 				}
 			}
 		}
-		if index, ok := t.ids[traceId]; ok {
+		if exists {
 			sameTraceIDResourceSpan.MoveAndAppendTo(t.traces[index].trace.ResourceSpans())
+			t.traces[index].spans += spans
+			t.traces[index].bytes += size
 			if startTime.Before(t.traces[index].startTime) {
 				t.traces[index].startTime = startTime
 			}
@@ -130,6 +145,75 @@ func (t *Tenant) storeTraces(tracesById map[pcommon.TraceID]ptrace.ResourceSpans
 			trace:     traces,
 			startTime: startTime,
 			endTime:   endTime,
+			spans:     spans,
+			bytes:     size,
+		}
+	}
+}
+
+var traceSizer = new(ptrace.ProtoMarshaler)
+
+// trimToBudget removes spans from rss, in place, until it holds at most
+// spanBudget spans and its resource spans add at most byteBudget bytes to the
+// protobuf encoding of a trace. It returns the spans and bytes that remain.
+// Resource spans left without spans are removed.
+func trimToBudget(rss ptrace.ResourceSpansSlice, spanBudget, byteBudget int) (spans, bytes int) {
+	rss.RemoveIf(func(rs ptrace.ResourceSpans) bool {
+		n, size := trimResourceSpans(rs, spanBudget-spans, byteBudget-bytes)
+		if n == 0 {
+			return true
+		}
+		spans += n
+		bytes += size
+		return false
+	})
+	return spans, bytes
+}
+
+// trimResourceSpans is trimToBudget for one resource spans. Spans that do not
+// fit are dropped and the ones that fit are kept, in order.
+func trimResourceSpans(rs ptrace.ResourceSpans, spanBudget, byteBudget int) (spans, bytes int) {
+	count := 0
+	spansSize := 0
+	for _, scopeSpan := range rs.ScopeSpans().All() {
+		count += scopeSpan.Spans().Len()
+		for _, span := range scopeSpan.Spans().All() {
+			spansSize += fieldSize(traceSizer.SpanSize(span))
+		}
+	}
+	size := fieldSize(traceSizer.ResourceSpansSize(rs))
+	if count <= spanBudget && size <= byteBudget {
+		return count, size
+	}
+	// The length prefixes of the enclosing messages only shrink as spans are
+	// removed, so the overhead measured before trimming bounds the overhead after.
+	used := size - spansSize
+	rs.ScopeSpans().RemoveIf(func(scopeSpan ptrace.ScopeSpans) bool {
+		scopeSpan.Spans().RemoveIf(func(span ptrace.Span) bool {
+			cost := fieldSize(traceSizer.SpanSize(span))
+			if spans < spanBudget && used+cost <= byteBudget {
+				spans++
+				used += cost
+				return false
+			}
+			return true
+		})
+		return scopeSpan.Spans().Len() == 0
+	})
+	if spans == 0 {
+		return 0, 0
+	}
+	return spans, fieldSize(traceSizer.ResourceSpansSize(rs))
+}
+
+// fieldSize returns the encoded size of a length-delimited protobuf field whose
+// number is below 16 and whose message is n bytes long.
+func fieldSize(n int) int {
+	size := 1 + n
+	for v := n; ; v >>= 7 {
+		size++
+		if v < 0x80 {
+			return size
 		}
 	}
 }

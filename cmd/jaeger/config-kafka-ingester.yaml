@@ -39,6 +39,10 @@ extensions:
       some_storage:
         memory:
           max_traces: 100000
+          # The e2e suite stores a trace of 10008 spans, larger than the
+          # defaults of 1024 spans and 1 MiB per trace.
+          max_spans_per_trace: 20000
+          max_bytes_per_trace: 16777216
 
 receivers:
   kafka:
