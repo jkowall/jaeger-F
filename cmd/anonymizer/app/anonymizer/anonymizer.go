@@ -6,6 +6,7 @@ package anonymizer
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"os"
@@ -81,7 +82,7 @@ func New(mappingFile string, options Options, logger *zap.Logger) *Anonymizer {
 			logger.Fatal("Cannot load previous mapping", zap.Error(err))
 		}
 		if err := json.Unmarshal(dat, &a.mapping); err != nil {
-			logger.Fatal("Cannot unmarshal previous mapping", zap.Error(err))
+			logger.Fatal("Cannot unmarshal previous mapping", zap.Error(redactMappingError(err)))
 		}
 	}
 	a.wg.Go(func() {
@@ -97,6 +98,16 @@ func New(mappingFile string, options Options, logger *zap.Logger) *Anonymizer {
 		}
 	})
 	return a
+}
+
+// redactMappingError drops the field path from a type error, because the path
+// includes map keys, and the keys of the mapping are the original names.
+func redactMappingError(err error) error {
+	var typeErr *json.UnmarshalTypeError
+	if errors.As(err, &typeErr) {
+		return fmt.Errorf("json: cannot unmarshal %s into value of type %v at offset %d", typeErr.Value, typeErr.Type, typeErr.Offset)
+	}
+	return err
 }
 
 func (a *Anonymizer) Stop() {
@@ -119,7 +130,7 @@ func (a *Anonymizer) SaveMapping() {
 		a.logger.Error("Failed to write mapping file", zap.Error(err))
 		return
 	}
-	a.logger.Sugar().Infof("Saved mapping file %s: %s", a.mappingFile, string(dat))
+	a.logger.Sugar().Infof("Saved mapping file %s", a.mappingFile)
 }
 
 func (a *Anonymizer) mapServiceName(service string) string {
