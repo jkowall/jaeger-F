@@ -24,9 +24,9 @@ import (
 */
 
 const (
-	spanKeyPrefix         byte = 0x80 // All span keys should have first bit set to 1
-	indexKeyRange         byte = 0x0F // Secondary indexes use last 4 bits
-	serviceNameIndexKey   byte = 0x81
+	spanKeyPrefix       byte = 0x80 // All span keys should have first bit set to 1
+	indexKeyRange       byte = 0x0F // Secondary indexes use last 4 bits
+	serviceNameIndexKey byte = 0x81
 	// 0x82 and 0x83 must not be reused: databases written by older versions hold operation
 	// and tag index keys there whose fields were joined without boundaries.
 	durationIndexKey      byte = 0x84
