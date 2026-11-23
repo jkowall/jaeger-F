@@ -96,7 +96,7 @@ func TestNewMetricsReaderInvalidAddress(t *testing.T) {
 func TestMetricsServerError(t *testing.T) {
 	endTime := time.Now()
 	lookback := time.Minute
-	step := time.Millisecond
+	step := time.Second
 	ratePer := 10 * time.Minute
 
 	params := metricstore.CallRateQueryParameters{
@@ -999,7 +999,7 @@ func sendResponse(t *testing.T, w http.ResponseWriter, responseFile string) {
 func buildTestBaseQueryParametersFrom(tc metricsTestCase) metricstore.BaseQueryParameters {
 	endTime := time.Now()
 	lookback := time.Minute
-	step := time.Millisecond
+	step := time.Second
 	ratePer := 10 * time.Minute
 
 	return metricstore.BaseQueryParameters{
@@ -1372,7 +1372,7 @@ func TestNewMetricsReaderWithHTTPAuth(t *testing.T) {
 
 			endTime := time.Now()
 			lookback := time.Minute
-			step := time.Millisecond
+			step := time.Second
 			ratePer := 10 * time.Minute
 
 			params := metricstore.CallRateQueryParameters{

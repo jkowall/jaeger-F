@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"time"
 
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
@@ -244,7 +245,36 @@ func (r MetricsReader) executeSearch(ctx context.Context, p MetricsQueryParams, 
 	return searchResult, nil
 }
 
+// calculateTimeRange returns the time range of a latency query, whose histogram covers the lookback.
 func calculateTimeRange(params *metricstore.BaseQueryParameters) (TimeRange, error) {
+	timeRange, err := lookbackTimeRange(params)
+	if err != nil {
+		return TimeRange{}, err
+	}
+	if err := checkHistogramPoints(params, *params.Lookback); err != nil {
+		return TimeRange{}, err
+	}
+	return timeRange, nil
+}
+
+// calculateRateTimeRange returns the time range of a rate query, whose histogram also covers
+// the ratePer interval before the lookback.
+func calculateRateTimeRange(params *metricstore.BaseQueryParameters) (TimeRange, error) {
+	timeRange, err := lookbackTimeRange(params)
+	if err != nil {
+		return TimeRange{}, err
+	}
+	if params.RatePer == nil {
+		return TimeRange{}, errors.New("invalid parameters: RatePer is required")
+	}
+	if err := checkHistogramPoints(params, *params.Lookback, *params.RatePer); err != nil {
+		return TimeRange{}, err
+	}
+	timeRange.extendedStartTimeMillis -= params.RatePer.Milliseconds()
+	return timeRange, nil
+}
+
+func lookbackTimeRange(params *metricstore.BaseQueryParameters) (TimeRange, error) {
 	if params == nil || params.EndTime == nil || params.Lookback == nil {
 		return TimeRange{}, errors.New("invalid parameters: EndTime and Lookback are required")
 	}
@@ -258,14 +288,13 @@ func calculateTimeRange(params *metricstore.BaseQueryParameters) (TimeRange, err
 	}, nil
 }
 
-func calculateRateTimeRange(params *metricstore.BaseQueryParameters) (TimeRange, error) {
-	timeRange, err := calculateTimeRange(params)
-	if err != nil {
-		return TimeRange{}, err
+// checkHistogramPoints rejects a query whose date histogram would hold more than
+// metricstore.MaxQueryPoints buckets. The histogram uses min_doc_count 0 and extended bounds
+// over the whole window, so the backend builds every bucket in it even when no span falls in.
+// The step is truncated to the millisecond fixed interval that the histogram is built with.
+func checkHistogramPoints(params *metricstore.BaseQueryParameters, window ...time.Duration) error {
+	if params.Step == nil {
+		return errors.New("invalid parameters: Step is required")
 	}
-	if params.RatePer == nil {
-		return TimeRange{}, errors.New("invalid parameters: RatePer is required")
-	}
-	timeRange.extendedStartTimeMillis -= params.RatePer.Milliseconds()
-	return timeRange, nil
+	return metricstore.CheckQueryPoints(params.Step.Truncate(time.Millisecond), window...)
 }
