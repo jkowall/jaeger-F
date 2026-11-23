@@ -4,12 +4,21 @@
 package app
 
 import (
+	"flag"
+
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
+	"go.opentelemetry.io/collector/config/configtls"
+
+	"github.com/jaegertracing/jaeger/internal/config/tlscfg"
 )
+
+var queryTLSFlagsCfg = tlscfg.ClientFlagsConfig{Prefix: "query"}
 
 // Options represent configurable parameters for jaeger-anonymizer
 type Options struct {
 	QueryGRPCHostPort string
+	QueryTLS          configtls.ClientConfig
 	MaxSpansCount     int
 	TraceID           string
 	OutputDir         string
@@ -40,8 +49,11 @@ func (o *Options) AddFlags(command *cobra.Command) {
 		&o.QueryGRPCHostPort,
 		queryGRPCHostPortFlag,
 		"localhost:16686",
-		"The host:port of the jaeger-query endpoint",
+		"The host:port of the jaeger-query endpoint. Without --query.tls.enabled only a loopback address is accepted",
 	)
+	tlsFlags := new(flag.FlagSet)
+	queryTLSFlagsCfg.AddFlags(tlsFlags)
+	command.Flags().AddGoFlagSet(tlsFlags)
 	command.Flags().StringVar(
 		&o.OutputDir,
 		outputDirFlag,
@@ -99,4 +111,14 @@ func (o *Options) AddFlags(command *cobra.Command) {
 
 	// mark traceid flag as mandatory
 	command.MarkFlagRequired(traceIDFlag)
+}
+
+// InitFromViper populates the TLS options from flags bound to v.
+func (o *Options) InitFromViper(v *viper.Viper) error {
+	tlsCfg, err := queryTLSFlagsCfg.InitFromViper(v)
+	if err != nil {
+		return err
+	}
+	o.QueryTLS = tlsCfg
+	return nil
 }

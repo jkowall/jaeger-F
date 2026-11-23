@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 	"go.uber.org/zap"
 
 	"github.com/jaegertracing/jaeger/cmd/anonymizer/app"
@@ -24,12 +25,16 @@ var logger, _ = zap.NewDevelopment()
 
 func main() {
 	options := app.Options{}
+	v := viper.New()
 
 	command := &cobra.Command{
 		Use:   "jaeger-anonymizer",
 		Short: "Jaeger anonymizer hashes fields of a trace for easy sharing",
 		Long:  `Jaeger anonymizer queries Jaeger query for a trace, anonymizes fields, and store in file`,
 		Run: func(_ *cobra.Command, _ /* args */ []string) {
+			if err := options.InitFromViper(v); err != nil {
+				logger.Fatal("error while parsing TLS flags", zap.Error(err))
+			}
 			prefix := options.OutputDir + "/" + options.TraceID
 			conf := writer.Config{
 				MaxSpansCount:  options.MaxSpansCount,
@@ -49,7 +54,7 @@ func main() {
 				logger.Fatal("error while creating writer object", zap.Error(err))
 			}
 
-			query, err := query.New(options.QueryGRPCHostPort)
+			query, err := query.NewWithTLS(options.QueryGRPCHostPort, options.QueryTLS)
 			if err != nil {
 				logger.Fatal("error while creating query object", zap.Error(err))
 			}
@@ -91,6 +96,7 @@ func main() {
 	}
 
 	options.AddFlags(command)
+	v.BindPFlags(command.Flags())
 
 	command.AddCommand(version.Command())
 
