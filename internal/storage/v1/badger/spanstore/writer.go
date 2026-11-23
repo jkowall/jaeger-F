@@ -138,14 +138,10 @@ func encodeIndexFields(fields ...string) []byte {
 // decodeIndexField returns the single length-prefixed field that makes up all of b.
 func decodeIndexField(b []byte) (string, bool) {
 	l, n := binary.Uvarint(b)
-	if n <= 0 {
+	if n <= 0 || l != uint64(len(b[n:])) {
 		return "", false
 	}
-	field := b[n:]
-	if l != uint64(len(field)) {
-		return "", false
-	}
-	return string(field), true
+	return string(b[n:]), true
 }
 
 func createIndexKey(indexPrefixKey byte, value []byte, startTime uint64, traceID model.TraceID) []byte {
