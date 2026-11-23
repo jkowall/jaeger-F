@@ -59,6 +59,11 @@ const (
 	// limitMultiple exists because many spans that are returned from indices can have the same trace, limitMultiple increases
 	// the number of responses from the index, so we can respect the user's limit value they provided.
 	limitMultiple = 3
+	// maxDurationBuckets is the most hourly duration_index buckets one search reads. Each bucket is a
+	// separate partition and so a separate statement, and an empty bucket does not end the walk, so the
+	// time range alone would otherwise decide how many statements a search sends. Two days matches the
+	// default trace TTL; buckets older than the newest maxDurationBuckets in the range are not read.
+	maxDurationBuckets = 48
 )
 
 var (
@@ -368,7 +373,10 @@ func (s *SpanReader) queryByDuration(ctx context.Context, traceQuery *tracestore
 	startTimeByHour := traceQuery.StartTimeMin.Round(durationBucketSize)
 	endTimeByHour := traceQuery.StartTimeMax.Round(durationBucketSize)
 
-	for timeBucket := endTimeByHour; timeBucket.After(startTimeByHour) || timeBucket.Equal(startTimeByHour); timeBucket = timeBucket.Add(-1 * durationBucketSize) {
+	// Sub saturates rather than overflowing, so a range of any width yields a count that min can cap.
+	numBuckets := min(int(endTimeByHour.Sub(startTimeByHour)/durationBucketSize)+1, maxDurationBuckets)
+	for i := range numBuckets {
+		timeBucket := endTimeByHour.Add(-time.Duration(i) * durationBucketSize)
 		_, childSpan := s.tracer.Start(ctx, "queryForTimeBucket")
 		childSpan.SetAttributes(attribute.Key("timeBucket").String(timeBucket.String()))
 		query := s.session.Query(
