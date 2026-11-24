@@ -76,7 +76,19 @@ func (*gogoCodec) Unmarshal(data mem.BufferSlice, v any) error {
 	elem := t.Elem() // only for collections
 	// use gogo proto only for Jaeger types
 	if useGogo(elem) {
-		return gogoproto.Unmarshal(data.Materialize(), v.(gogoproto.Message))
+		buf := data.Materialize()
+		if err := checkNesting(buf); err != nil {
+			return err
+		}
+		return gogoproto.Unmarshal(buf, v.(gogoproto.Message))
+	}
+	if _, ok := v.(generatedUnmarshaler); ok {
+		buf := data.MaterializeToBuffer(mem.DefaultBufferPool())
+		defer buf.Free()
+		if err := checkNesting(buf.ReadOnlyData()); err != nil {
+			return err
+		}
+		return defaultCodec.Unmarshal(mem.BufferSlice{buf}, v)
 	}
 	return defaultCodec.Unmarshal(data, v)
 }

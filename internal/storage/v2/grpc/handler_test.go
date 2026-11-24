@@ -815,10 +815,71 @@ func TestConvertKeyValueListToMap(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			result := convertKeyValueListToMap(test.input)
+			result, err := convertKeyValueListToMap(test.input)
+			require.NoError(t, err)
 			assert.Equal(t, test.expected, result)
 		})
 	}
+}
+
+// wrapAttributeValue wraps av in one array, or one key-value list, per entry of kinds, the first
+// entry outermost.
+func wrapAttributeValue(av *storage.AnyValue, kinds ...string) *storage.AnyValue {
+	for i := len(kinds) - 1; i >= 0; i-- {
+		if kinds[i] == "array" {
+			av = &storage.AnyValue{Value: &storage.AnyValue_ArrayValue{ArrayValue: &storage.ArrayValue{
+				Values: []*storage.AnyValue{av},
+			}}}
+			continue
+		}
+		av = &storage.AnyValue{Value: &storage.AnyValue_KvlistValue{KvlistValue: &storage.KeyValueList{
+			Values: []*storage.KeyValue{{Key: "k", Value: av}},
+		}}}
+	}
+	return av
+}
+
+func TestConvertKeyValueListToMapBoundsNesting(t *testing.T) {
+	leaf := &storage.AnyValue{Value: &storage.AnyValue_StringValue{StringValue: "x"}}
+	nesting := func(outer, inner string, depth int) []string {
+		kinds := make([]string, depth)
+		for i := range kinds {
+			kinds[i] = outer
+			if i%2 == 1 {
+				kinds[i] = inner
+			}
+		}
+		return kinds
+	}
+	// The four shapes refuse the extra level in each branch of setValueToMap and setValueToSlice.
+	for _, tc := range []struct{ name, outer, inner string }{
+		{"arrays", "array", "array"},
+		{"key-value lists", "kvlist", "kvlist"},
+		{"array outermost, alternating", "array", "kvlist"},
+		{"key-value list outermost, alternating", "kvlist", "array"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := convertKeyValueListToMap([]*storage.KeyValue{
+				{Key: "k", Value: wrapAttributeValue(leaf, nesting(tc.outer, tc.inner, maxAttributeNesting)...)},
+			})
+			require.NoError(t, err)
+
+			_, err = convertKeyValueListToMap([]*storage.KeyValue{
+				{Key: "k", Value: wrapAttributeValue(leaf, nesting(tc.outer, tc.inner, maxAttributeNesting+1)...)},
+			})
+			require.ErrorIs(t, err, errAttributeNestedTooDeeply)
+			assert.Equal(t, codes.InvalidArgument, status.Code(err))
+		})
+	}
+
+	t.Run("query", func(t *testing.T) {
+		_, err := NewHandler(nil, nil, nil).toTraceQueryParams(&storage.TraceQueryParameters{
+			Attributes: []*storage.KeyValue{
+				{Key: "k", Value: wrapAttributeValue(leaf, nesting("array", "array", maxAttributeNesting+1)...)},
+			},
+		})
+		assert.Equal(t, codes.InvalidArgument, status.Code(err))
+	})
 }
 
 // summaryStream captures sent FindTraceSummaries responses.
