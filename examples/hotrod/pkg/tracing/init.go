@@ -8,8 +8,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
-	"strings"
 	"sync"
 	"time"
 
@@ -25,6 +23,7 @@ import (
 
 	"github.com/jaegertracing/jaeger/examples/hotrod/pkg/log"
 	"github.com/jaegertracing/jaeger/examples/hotrod/pkg/tracing/rpcmetrics"
+	"github.com/jaegertracing/jaeger/internal/jtracer"
 	"github.com/jaegertracing/jaeger/internal/metrics"
 	"github.com/jaegertracing/jaeger/internal/telemetry/otelsemconv"
 )
@@ -70,12 +69,6 @@ func InitOTEL(serviceName string, exporterType string, metricsFactory metrics.Fa
 	return tp
 }
 
-// withSecure instructs the client to use HTTPS scheme, instead of hotrod's desired default HTTP
-func withSecure() bool {
-	return strings.HasPrefix(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"), "https://") ||
-		strings.ToLower(os.Getenv("OTEL_EXPORTER_OTLP_INSECURE")) == "false"
-}
-
 func createOtelExporter(exporterType string) (sdktrace.SpanExporter, error) {
 	var exporter sdktrace.SpanExporter
 	var err error
@@ -83,13 +76,9 @@ func createOtelExporter(exporterType string) (sdktrace.SpanExporter, error) {
 	case "jaeger":
 		return nil, errors.New("jaeger exporter is no longer supported, please use otlp")
 	case "otlp":
-		var opts []otlptracehttp.Option
-		if !withSecure() {
-			opts = []otlptracehttp.Option{otlptracehttp.WithInsecure()}
-		}
 		exporter, err = otlptrace.New(
 			context.Background(),
-			otlptracehttp.NewClient(opts...),
+			otlptracehttp.NewClient(jtracer.HTTPOptions()...),
 		)
 	case "stdout":
 		exporter, err = stdouttrace.New()
