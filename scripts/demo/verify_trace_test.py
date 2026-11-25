@@ -47,16 +47,30 @@ class TraceVerificationTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "rejected"):
             verify_trace.check_trace("collector", "query", attempts=1)
 
+    @patch("verify_trace.check_trace")
+    @patch("verify_trace.subprocess.Popen")
     @patch("verify_trace.subprocess.run")
     @patch("verify_trace.request")
-    def test_rejects_wrong_server_or_dashboard_version(self, request, run):
+    def test_rejects_wrong_server_or_dashboard_version(self, request, run, popen, check):
         run.return_value.stdout = '{"version":{"number":"3.7.0"}}'
         with self.assertRaisesRegex(RuntimeError, "OpenSearch"):
             verify_trace.verify("3.9.0")
+        popen.assert_not_called()
         run.return_value.stdout = '{"version":{"number":"3.9.0"}}'
         request.return_value = {"version": {"number": "3.7.0"}}
         with self.assertRaisesRegex(RuntimeError, "Dashboards"):
             verify_trace.verify("3.9.0")
+        check.assert_not_called()
+
+    @patch("verify_trace.time.sleep")
+    @patch("verify_trace.request")
+    def test_dashboards_status_is_read_through_the_cluster_and_retried(self, request, sleep):
+        request.side_effect = [urllib.error.URLError("not ready"), {"version": {"number": "3.9.0"}}]
+        self.assertEqual("3.9.0", verify_trace.dashboards_version("http://127.0.0.1:15601", attempts=2))
+        self.assertEqual("http://127.0.0.1:15601/api/status", request.call_args.args[0])
+        request.side_effect = urllib.error.URLError("not ready")
+        with self.assertRaisesRegex(RuntimeError, "Dashboards"):
+            verify_trace.dashboards_version("http://127.0.0.1:15601", attempts=1)
 
     @patch("verify_trace.check_trace")
     @patch("verify_trace.subprocess.Popen")
@@ -65,13 +79,15 @@ class TraceVerificationTests(unittest.TestCase):
     def test_cleans_up_port_forwards_even_when_trace_verification_fails(self, request, run, popen, check):
         run.return_value.stdout = '{"version":{"number":"3.9.0"}}'
         request.return_value = {"version": {"number": "3.9.0"}}
-        first, second = MagicMock(), MagicMock()
-        popen.side_effect = [first, second]
+        forwards = [MagicMock(), MagicMock(), MagicMock()]
+        popen.side_effect = forwards
         check.side_effect = RuntimeError("trace failed")
         with self.assertRaisesRegex(RuntimeError, "trace failed"):
             verify_trace.verify("3.9.0")
-        first.__enter__.return_value.terminate.assert_called_once()
-        second.__enter__.return_value.terminate.assert_called_once()
+        self.assertIn("svc/opensearch-dashboards", popen.call_args_list[0].args[0])
+        self.assertEqual("http://127.0.0.1:15601/api/status", request.call_args.args[0])
+        for forward in forwards:
+            forward.__enter__.return_value.terminate.assert_called_once()
 
 
 if __name__ == "__main__":

@@ -8,7 +8,6 @@ This directory contains the HTTPS ingress configurations for exposing the observ
 
 - **`clusterissuer-letsencrypt-prod.yaml`** - Let's Encrypt certificate issuer (already deployed)
 - **`ingress-jaeger.yaml`** - Exposes Jaeger UI and HotROD demo
-- **`ingress-opensearch.yaml`** - Exposes OpenSearch Dashboards
 - **`ingress-otel-demo.yaml`** - Exposes OTel Demo Shop (frontend-proxy)
 
 ## Exposed Services
@@ -17,7 +16,6 @@ This directory contains the HTTPS ingress configurations for exposing the observ
 |---------|-----|-----------------|------|
 | Jaeger UI | https://jaeger.demo.jaegertracing.io | jaeger-query-clusterip | 16686 |
 | HotROD Demo | https://hotrod.demo.jaegertracing.io | jaeger-hotrod | 80 |
-| OpenSearch Dashboards | https://opensearch.demo.jaegertracing.io | opensearch-dashboards | 5601 |
 | OTel Demo Shop | https://shop.demo.jaegertracing.io | frontend-proxy | 8080 |
 | Load Generator | https://shop.demo.jaegertracing.io/loadgen/ | (via frontend-proxy) | 8080 |
 
@@ -32,7 +30,6 @@ kubectl get certificates --all-namespaces
 
 ### Certificate Secrets
 - `jaeger-demo-tls` (namespace: jaeger)
-- `opensearch-demo-tls` (namespace: opensearch)
 - `otel-demo-tls` (namespace: otel-demo)
 
 ### Force Certificate Renewal
@@ -55,7 +52,6 @@ All hostnames must resolve to the NGINX ingress controller external IP:
 ```
 jaeger.demo.jaegertracing.io     -> 170.9.51.232
 hotrod.demo.jaegertracing.io     -> 170.9.51.232
-opensearch.demo.jaegertracing.io -> 170.9.51.232
 shop.demo.jaegertracing.io       -> 170.9.51.232
 ```
 
@@ -88,6 +84,7 @@ kubectl logs -n ingress-nginx -l app.kubernetes.io/name=ingress-nginx
 
 ## Security Notes
 
+- OpenSearch Dashboards is **not** exposed to the internet: it runs with the OpenSearch security plugin disabled and would give anyone full control of the cluster. `deploy-all.sh` deletes any leftover `opensearch-demo-ingress`; operators reach Dashboards with `../start-port-forward.sh`
 - Load generator is **not** directly exposed to the internet
 - Access load generator via frontend-proxy: https://shop.demo.jaegertracing.io/loadgen/
 - All certificates are production Let's Encrypt certificates
