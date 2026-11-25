@@ -1,7 +1,7 @@
 # Badger Storage Record Layouts
 
 * **Status**: Documented existing implementation
-* **Date**: 2026-03-12
+* **Date**: 2026-03-12 (service/operation cache bounds added 2026-11-22)
 
 ## Context
 
@@ -219,7 +219,9 @@ The cache is populated in two ways:
 1. **On write**: `cache.Update(serviceName, operationName, expireTime)` is called after every `WriteSpan`, keeping the cache current without re-scanning Badger.
 2. **On startup** (if `prefillCache=true`): the reader scans all service name index keys (`0x81`) and operation name index keys (`0x82`) to preload any entries persisted from a previous run.
 
-Expired entries are lazily removed from the cache when `GetServices` or `GetOperations` is called.
+Names whose expiry has already passed are not added, and a failed `WriteSpan` does not update the cache. Expired entries are removed when `GetServices` or `GetOperations` is called, and also on the write path whenever a new name is added: a new service sweeps expired services, and a new operation sweeps the expired operations of its service.
+
+Because the names come from ingested spans, the cache is bounded: at most 1024 services, at most 1024 operations per service, and a total size budget of 32 MiB, where each name is charged its length plus a fixed per-entry overhead. When a limit is reached, the entries closest to expiry are evicted first. Under the size budget, the operations of other services are evicted before service names. An evicted name returns to the cache with the next span that carries it.
 
 ---
 
