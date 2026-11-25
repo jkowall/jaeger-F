@@ -259,6 +259,14 @@ testIngressReconcileFailsWhenPublicDashboardsCannotBeRemoved() {
   assertContains "$output" "Failed to remove the public OpenSearch Dashboards ingress"
 }
 
+testDashboardsValuesDoNotInlineBackendCredentials() {
+  local values
+  values=$(<"$(dirname "$SCRIPT")/opensearch-dashboard-values.yaml")
+
+  assertNotContains "$values" "opensearch.username"
+  assertNotContains "$values" "opensearch.password"
+}
+
 testPinsCompatibleOtelDemoChart() {
   output=$(bash -c 'source "$1"; printf "%s" "$OTEL_DEMO_CHART_VERSION"' _ "$SCRIPT")
   assertTrue "OTel demo should pin an explicit chart release" "[[ '$output' =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]"
