@@ -1,8 +1,11 @@
 # Copyright (c) 2026 The Jaeger Authors.
 # SPDX-License-Identifier: Apache-2.0
 
-# CI Summary Report (Publish): posts PR comments and check runs from the
-# pre-computed ci-summary artifact produced by ci-summary-report.yml.
+# CI Summary Report (Publish): posts PR comments and check runs for a CI
+# Orchestrator run. The Coverage Gate and Metrics Comparison conclusions are
+# computed here, with default-branch code, from the run's raw coverage profiles
+# and metrics artifacts; the ci-summary artifact from ci-summary-report.yml only
+# supplies display data.
 #
 # Triggered by workflow_run on CI Orchestrator completion (success OR failure).
 # pull_request workflows from forks run with read-only permissions regardless of
@@ -65,23 +68,56 @@ jobs:
           echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
 
       # Checkout the base repo so that .github/scripts/ci-summary-report-publish.js
-      # is available for require() in the github-script step below.
+      # and the coverage tools are available to the steps below.
       # Do NOT checkout the PR head: this workflow must only run base-repo code.
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
-      # Download the ci-summary artifact (pre-computed by ci-summary-report.yml).
-      # Do not print the file: on a fork PR its contents are attacker-controlled.
-      - name: Download CI summary artifact
+      # Download the ci-summary artifact and the raw coverage and metrics
+      # artifacts the gates are scored from. On a fork PR every one of them was
+      # produced by the fork's code: do not print them. Each pattern-matched
+      # artifact lands in its own .artifacts/<name>/ directory, and only
+      # ci-summary.json is taken from the ci-summary artifact, so no artifact can
+      # supply the merged profile or the baseline the steps below create.
+      - name: Download CI artifacts
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RUN_ID: ${{ steps.source-run.outputs.run_id }}
           REPO: ${{ github.repository }}
         run: |
+          rm -rf .artifacts .ci-summary
+          mkdir -p .artifacts
           gh run download "$RUN_ID" \
             --repo "$REPO" \
             --name ci-summary \
-            --dir .artifacts \
+            --dir .ci-summary \
           || echo "::warning::ci-summary artifact not found; proceeding without summary artifact (later checks may fail)."
+          if [ -f .ci-summary/ci-summary.json ] && [ ! -L .ci-summary/ci-summary.json ]; then
+            cp .ci-summary/ci-summary.json .artifacts/ci-summary.json
+          fi
+          gh run download "$RUN_ID" \
+            --repo "$REPO" \
+            --pattern 'coverage-*' \
+            --pattern 'metrics_snapshot_*' \
+            --pattern 'diff_metrics_snapshot_*' \
+            --dir .artifacts \
+          || echo "::warning::No coverage or metrics artifacts found; Coverage Gate and Metrics Comparison will fail."
+
+      # Merge and filter with this checkout's code only. Any failure leaves no
+      # merged profile, which fails Coverage Gate.
+      - name: Merge and filter coverage profiles
+        run: node .github/scripts/coverage-profile.js merge .artifacts .artifacts/merged-coverage.out && python3 scripts/e2e/filter_coverage.py .artifacts/merged-coverage.out || rm -f .artifacts/merged-coverage.out
+
+      # This workflow runs on the default branch, so it only sees caches saved by
+      # main-branch runs. A push to main is not compared against the baseline,
+      # matching the coverage gate in ci-summary-report.yml.
+      - name: Restore baseline coverage from main
+        if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.event != 'push'
+        uses: actions/cache/restore@1bd1e32a3bdc45362d1e726936510720a7c30a57
+        with:
+          path: .artifacts/baseline-coverage.txt
+          key: coverage-baseline_${{ github.run_id }}
+          restore-keys: |
+            coverage-baseline_
 
       # The script takes the CI run, commit, and PR from `context`, so nothing
       # is interpolated into the script source.
