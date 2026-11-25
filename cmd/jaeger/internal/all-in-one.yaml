@@ -58,13 +58,15 @@ extensions:
       endpoint: "${env:JAEGER_LISTEN_HOST:-localhost}:13133"
     grpc:
 
+  # expvar and zpages expose process internals and have no authenticator,
+  # so they stay on loopback even when JAEGER_LISTEN_HOST is 0.0.0.0.
   expvar:
-    endpoint: "${env:JAEGER_LISTEN_HOST:-localhost}:27777"
+    endpoint: "localhost:27777"
 
   zpages:
     # for some reason the official extension listens on ephemeral port 55679
     # so we override it with a normal port
-    endpoint: "${env:JAEGER_LISTEN_HOST:-localhost}:27778"
+    endpoint: "localhost:27778"
 
 receivers:
   otlp:

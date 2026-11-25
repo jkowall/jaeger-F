@@ -134,10 +134,10 @@ which is the embedded default. Separate configs can still split them.
 - **Implementation**: Receivers, query HTTP, query gRPC, health,
   metrics, expvar, and zpages are different ports.
 - **Evidence**: Embedded all-in-one endpoints. `expvar` and `zpages` are
-  process-introspection ports. The official image sets
-  `JAEGER_LISTEN_HOST=0.0.0.0`, which binds the embedded ones on all
-  interfaces. `pprof` is in `cmd/jaeger/config.yaml`, not in the
-  embedded config.
+  process-introspection ports bound to `localhost`. The official image sets
+  `JAEGER_LISTEN_HOST=0.0.0.0`, which binds the other embedded ports on all
+  interfaces. `pprof` is in `cmd/jaeger/config.yaml` on `localhost`, not
+  in the embedded config.
 
 ### Psychological Acceptability
 

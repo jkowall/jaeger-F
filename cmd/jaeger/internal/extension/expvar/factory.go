@@ -32,7 +32,7 @@ func createDefaultConfig() component.Config {
 	return &Config{
 		ServerConfig: confighttp.ServerConfig{
 			NetAddr: confignet.AddrConfig{
-				Endpoint:  fmt.Sprintf("0.0.0.0:%d", Port),
+				Endpoint:  fmt.Sprintf("localhost:%d", Port),
 				Transport: confignet.TransportTypeTCP,
 			},
 		},

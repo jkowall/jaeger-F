@@ -71,7 +71,8 @@ Default query listen addresses come from `ports.PortToHostPort` and are
 `:16686` (HTTP) and `:16685` (gRPC). A leading colon binds every interface.
 `JAEGER_LISTEN_HOST` does not change those defaults. The official image sets
 `JAEGER_LISTEN_HOST=0.0.0.0`, which does change the receivers, remote
-sampling, health check, expvar, and zpages endpoints in the embedded config.
+sampling, and health check endpoints in the embedded config. The embedded
+expvar and zpages endpoints are fixed to `localhost`.
 
 Storage backends configured under `jaeger_storage`:
 
@@ -115,7 +116,7 @@ tools. They are not the query or ingest path.
 | **B4: Query/UI → users** | HTTP and gRPC | TLS and `auth.authenticator` are collector server settings and are unset by default. The same `auth.authenticator` setting applies to `remote_sampling` HTTP/gRPC and to the `remote_storage` extension's gRPC server. The standalone `jaeger-remote-storage` binary cannot use an authenticator (see T5). The shipped server authenticator is `basicauth` (htpasswd). `sigv4auth` is a client authenticator for outbound AWS calls, not a listener authenticator. |
 | **B5: Query → MCP and AI clients** | Trace data and tool calls | `/api/ai/mcp/`, `/api/ai/chat`, and `/api/ai/mcp/<id>/` are on the query HTTP mux in the embedded config, because `ai.mcp: {}` keeps the default `agent_url`. None of them has a second authenticator. Chat dials that WebSocket and can announce the turn-scoped MCP URL to the sidecar. |
 | **B6: Browser rendering** | Span data and uploaded JSON | The UI renders stored traces and files dropped on the search page. See T7 and T8. |
-| **B7: Debug listeners** | Process internals | Embedded config enables `healthcheckv2`, `expvar`, and `zpages` on `JAEGER_LISTEN_HOST`. `cmd/jaeger/config.yaml` also enables `pprof` on `0.0.0.0:1777`. Query gRPC registers server reflection. |
+| **B7: Debug listeners** | Process internals | Embedded config enables `healthcheckv2` on `JAEGER_LISTEN_HOST`, and `expvar` and `zpages` on `localhost`. `cmd/jaeger/config.yaml` also enables `pprof` on `localhost:1777`. Query gRPC registers server reflection. |
 
 Out of scope: instrumented applications, OpenTelemetry SDKs, the internal
 implementation of Elasticsearch, Cassandra, ClickHouse, Kafka, and identity
@@ -309,9 +310,11 @@ that target for `/api/otlp/v1/*`. Callers who can reach query can submit
 spans there.
 
 `expvar` and `zpages` expose process internals. `pprof` exposes profiles and
-is present in `cmd/jaeger/config.yaml` on `0.0.0.0:1777`, not in the
-embedded config. In the official image, `JAEGER_LISTEN_HOST=0.0.0.0` binds
-the embedded expvar, zpages, health, and sampling ports on all interfaces.
+is present in `cmd/jaeger/config.yaml` on `localhost:1777`, not in the
+embedded config. None of the three has an authenticator, so the shipped
+configs keep them on `localhost`. In the official image,
+`JAEGER_LISTEN_HOST=0.0.0.0` binds the embedded health and sampling ports on
+all interfaces, but not expvar or zpages.
 
 ## What this model does not claim
 
