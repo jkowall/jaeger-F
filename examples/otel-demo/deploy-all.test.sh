@@ -223,6 +223,42 @@ testJaegerCleanInstallIncludesSharedUIConfig() {
   assertContains "$output" "--set-file uiconfig=$(dirname "$SCRIPT")/../oci/ui-config.json"
 }
 
+run_ingress_reconcile() {
+  bash -c '
+    source "$1"
+    log() { printf "%s\n" "$*"; }
+    sleep() { :; }
+    kubectl() {
+      printf "kubectl"; printf " %s" "$@"; printf "\n"
+      case "$1" in
+        delete) return "$KUBECTL_DELETE_RC" ;;
+        apply) printf "configured\n" ;;
+      esac
+    }
+    deploy_ingress
+  ' _ "$SCRIPT"
+}
+
+testIngressReconcileRemovesPublicDashboards() {
+  output=$(KUBECTL_DELETE_RC=0 run_ingress_reconcile 2>&1)
+  rc=$?
+
+  assertEquals "ingress reconcile should succeed" 0 "$rc"
+  assertContains "$output" "kubectl delete ingress opensearch-demo-ingress -n opensearch --ignore-not-found=true"
+  assertContains "$output" "Jaeger ingress configured"
+  assertNotContains "$output" "ingress-opensearch.yaml"
+  assertNotContains "$output" "opensearch.demo.jaegertracing.io"
+  assertFalse "Dashboards ingress manifest must not be published" "[[ -e '$(dirname "$SCRIPT")/ingress/ingress-opensearch.yaml' ]]"
+}
+
+testIngressReconcileFailsWhenPublicDashboardsCannotBeRemoved() {
+  output=$(KUBECTL_DELETE_RC=1 run_ingress_reconcile 2>&1)
+  rc=$?
+
+  assertNotEquals "a leftover public Dashboards ingress must fail the deploy" 0 "$rc"
+  assertContains "$output" "Failed to remove the public OpenSearch Dashboards ingress"
+}
+
 testPinsCompatibleOtelDemoChart() {
   output=$(bash -c 'source "$1"; printf "%s" "$OTEL_DEMO_CHART_VERSION"' _ "$SCRIPT")
   assertTrue "OTel demo should pin an explicit chart release" "[[ '$output' =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]"

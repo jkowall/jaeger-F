@@ -492,10 +492,10 @@ deploy_ingress() {
     log " Failed to apply Jaeger ingress "
   fi
 
-  if kubectl apply -f "$SCRIPT_DIR/ingress/ingress-opensearch.yaml" 2>&1 | grep -q "created\|configured\|unchanged"; then
-    log " OpenSearch ingress configured (opensearch.demo.jaegertracing.io)"
-  else
-    log "  Failed to apply OpenSearch ingress "
+  # OpenSearch Dashboards runs with security disabled and gives full cluster
+  # access, so it must never be published; use start-port-forward.sh instead.
+  if ! kubectl delete ingress opensearch-demo-ingress -n opensearch --ignore-not-found=true; then
+    err "Failed to remove the public OpenSearch Dashboards ingress"
   fi
 
   if kubectl apply -f "$SCRIPT_DIR/ingress/ingress-otel-demo.yaml" 2>&1 | grep -q "created\|configured\|unchanged"; then
@@ -511,7 +511,7 @@ deploy_ingress() {
   local certs_ready=0
   local certs_total=0
 
-  for ns in jaeger opensearch otel-demo; do
+  for ns in jaeger otel-demo; do
     if kubectl get namespace "$ns" >/dev/null 2>&1; then
       if kubectl get certificate -n "$ns" >/dev/null 2>&1; then
         certs_total=$((certs_total + 1))
@@ -534,7 +534,6 @@ deploy_ingress() {
   log "HTTPS endpoints:"
   log " • https://jaeger.demo.jaegertracing.io"
   log " • https://hotrod.demo.jaegertracing.io"
-  log " • https://opensearch.demo.jaegertracing.io"
   log " • https://shop.demo.jaegertracing.io"
 }
 

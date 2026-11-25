@@ -56,19 +56,30 @@ def check_trace(collector, query, attempts=30):
     raise RuntimeError("Fresh deployment trace could not be written and retrieved")
 
 
+def dashboards_version(dashboards, attempts=30):
+    for _ in range(attempts):
+        try:
+            return request(dashboards + "/api/status")["version"]["number"]
+        except (urllib.error.URLError, TimeoutError):
+            time.sleep(2)
+    raise RuntimeError("Dashboards status could not be retrieved")
+
+
 def verify(version):
     output = subprocess.run(["kubectl", "-n", "opensearch", "exec", "opensearch-cluster-single-0", "--",
                              "curl", "-fsS", "http://localhost:9200/"], check=True, capture_output=True, text=True)
     if json.loads(output.stdout)["version"]["number"] != version:
         raise RuntimeError("Live OpenSearch version does not match the chart pin")
-    if request("https://opensearch.demo.jaegertracing.io/api/status")["version"]["number"] != version:
-        raise RuntimeError("Public Dashboards version does not match the chart pin")
     with ExitStack() as stack:
-        for service, ports in (("jaeger-collector", "14318:4318"), ("jaeger-query", "16687:16686")):
+        for namespace, service, ports in (("opensearch", "opensearch-dashboards", "15601:5601"),
+                                          ("jaeger", "jaeger-collector", "14318:4318"),
+                                          ("jaeger", "jaeger-query", "16687:16686")):
             process = stack.enter_context(subprocess.Popen(
-                ["kubectl", "-n", "jaeger", "port-forward", "svc/" + service, ports],
+                ["kubectl", "-n", namespace, "port-forward", "svc/" + service, ports],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
             stack.callback(process.terminate)
+        if dashboards_version("http://127.0.0.1:15601") != version:
+            raise RuntimeError("Dashboards version does not match the chart pin")
         check_trace("http://127.0.0.1:14318", "http://127.0.0.1:16687")
 
 
