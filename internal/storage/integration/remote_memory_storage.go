@@ -46,7 +46,8 @@ func StartNewRemoteMemoryStorage(t *testing.T, port int) *RemoteMemoryStorage {
 
 	traceFactory, err := memory.NewFactory(
 		memory.Configuration{
-			MaxTraces: 10000,
+			MaxTraces:        10000,
+			MaxSpansPerTrace: largeTraceSpanCount,
 		},
 		telset,
 	)

@@ -77,7 +77,7 @@ Storage backends configured under `jaeger_storage`:
 
 | Trace backend | Notes |
 | --- | --- |
-| `memory` | Default. Bounded by `max_traces` (100000 in the embedded config). |
+| `memory` | Default. Bounded by `max_traces` (100000 in the embedded config), and each trace by `max_spans_per_trace` (default 1024) and `max_bytes_per_trace` (default 1 MiB). |
 | `badger` | Local disk. |
 | `elasticsearch`, `opensearch` | HTTP client. TLS and basic, bearer, or API-key auth are config. |
 | `cassandra` | CQL. TLS and basic auth are config. |
