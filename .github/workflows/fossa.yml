@@ -37,9 +37,22 @@ jobs:
           # so it cannot be auto-detected during analysis.
           rm -rf internal/tools
 
+      - name: Check for FOSSA API key
+        id: fossa-key
+        env:
+          FOSSA_API_KEY: ${{ secrets.FOSSA_API_KEY }}
+        run: |
+          # Secrets are not passed to pull requests from forks.
+          if [[ -n "$FOSSA_API_KEY" ]]; then
+            echo "available=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "::notice::FOSSA_API_KEY secret is not available; skipping FOSSA upload."
+          fi
+
       - name: Run FOSSA scan and upload report
+        if: steps.fossa-key.outputs.available == 'true'
         uses: fossa-contrib/fossa-action@d28f0c947e7406706981a62a91ecc009bcc39fd7 # v4.0.0
         with:
           # FOSSA Push-Only API Token
-          fossa-api-key: 304657e2357ba57b416b94e6b119131b
+          fossa-api-key: ${{ secrets.FOSSA_API_KEY }}
           github-token: ${{ github.token }}
