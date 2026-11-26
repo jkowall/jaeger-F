@@ -218,14 +218,19 @@ func initRouter(
 	}
 
 	if queryOpts.AI.HasValue() {
+		var trustedOrigins []string
+		if cors := queryOpts.HTTP.CORS.Get(); cors != nil {
+			trustedOrigins = cors.AllowedOrigins
+		}
 		aiRoutes, err := jaegerai.Register(ctx, r, jaegerai.RegisterParams{
-			Config:       queryOpts.AI.Get(),
-			BasePath:     queryOpts.BasePath,
-			HTTPEndpoint: queryOpts.HTTP.NetAddr.Endpoint,
-			TLSEnabled:   queryOpts.HTTP.TLS.HasValue(),
-			QueryService: querySvc,
-			Tenancy:      tenancyMgr,
-			Telemetry:    telset,
+			Config:         queryOpts.AI.Get(),
+			BasePath:       queryOpts.BasePath,
+			HTTPEndpoint:   queryOpts.HTTP.NetAddr.Endpoint,
+			TLSEnabled:     queryOpts.HTTP.TLS.HasValue(),
+			TrustedOrigins: trustedOrigins,
+			QueryService:   querySvc,
+			Tenancy:        tenancyMgr,
+			Telemetry:      telset,
 		})
 		if err != nil {
 			return nil, nil, errors.Join(err, cs.Close())

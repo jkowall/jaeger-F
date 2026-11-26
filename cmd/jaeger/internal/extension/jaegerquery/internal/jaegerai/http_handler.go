@@ -4,6 +4,7 @@
 package jaegerai
 
 import (
+	"mime"
 	"net/http"
 	"strings"
 
@@ -34,6 +35,9 @@ type Handler struct {
 	mcp *turnScopedEndpoint
 	// authMiddleware is HandlerParams.AuthMiddleware.
 	authMiddleware func(http.Handler) http.Handler
+	// crossOrigin refuses browser requests from origins other than the query
+	// server's own and HandlerParams.TrustedOrigins.
+	crossOrigin *http.CrossOriginProtection
 }
 
 // HandlerParams carries the dependencies for the AI gateway Handler. Grouping them
@@ -65,6 +69,12 @@ type HandlerParams struct {
 	// listed under ai.auth.request_params, does not reach the check, so a tool
 	// call is refused unless the operator forwards the header ai.auth reads.
 	AuthMiddleware func(http.Handler) http.Handler
+	// TrustedOrigins are the browser origins, besides the query server's own, that
+	// may start a chat turn: the query server's http.cors.allowed_origins, the
+	// origins an operator already lets make credentialed requests to this port.
+	// Only exact origins are honored; a wildcard pattern is skipped with a warning,
+	// since trusting "*" would let any page start a turn.
+	TrustedOrigins []string
 }
 
 // NewHandler constructs a jaegerai.Handler, building the endpoints it will mount.
@@ -76,7 +86,12 @@ func NewHandler(p HandlerParams) *Handler {
 	basePath := normalizeBasePath(p.BasePath)
 	turns := newTurnRegistry()
 	chat := newChatEndpoint(p.Logger, turns, p.AgentURL, p.AgentHeaders, basePath, p.MaxRequestBodySize)
-	h := &Handler{basePath: basePath, chat: chat, authMiddleware: p.AuthMiddleware}
+	h := &Handler{
+		basePath:       basePath,
+		chat:           chat,
+		authMiddleware: p.AuthMiddleware,
+		crossOrigin:    newCrossOriginProtection(p.Logger, p.TrustedOrigins),
+	}
 	if p.MCP != nil {
 		h.mcp = turnScopedEndpointBuilder{
 			baseHandler: p.MCP,
@@ -115,11 +130,50 @@ func normalizeBasePath(basePath string) string {
 //     is enabled). Both the slash and no-slash forms are mounted; the {mcpRouteID}
 //     wildcard is more specific than the shared "/api/ai/mcp/" pattern jaeger-query
 //     mounts, so all coexist.
+//
+// Both refuse cross-origin browser requests, and chat also refuses a POST whose
+// body is not declared as JSON. A page on any site can make the
+// operator's browser send a text/plain, form, or multipart POST, with the
+// browser's HTTP credentials, without a CORS preflight; a turn started that way
+// runs the agent on the page's prompt even though the page cannot read the reply.
+// The checks sit inside the auth middleware, so an anonymous caller is still told
+// it is unauthorized.
 func (h *Handler) RegisterRoutes(router *http.ServeMux) {
-	router.Handle(h.basePath+routeChat, h.guarded(h.chat))
+	router.Handle(h.basePath+routeChat, h.guarded(h.crossOrigin.Handler(requireJSONBody(h.chat))))
 	if h.mcp != nil {
-		h.mcp.registerRoutes(router, h.guarded(h.mcp))
+		h.mcp.registerRoutes(router, h.guarded(h.crossOrigin.Handler(h.mcp)))
 	}
+}
+
+func newCrossOriginProtection(logger *zap.Logger, trustedOrigins []string) *http.CrossOriginProtection {
+	c := http.NewCrossOriginProtection()
+	for _, origin := range trustedOrigins {
+		if strings.Contains(origin, "*") {
+			logger.Warn("AI chat does not trust wildcard CORS origins; list the origin exactly to let it use AI chat",
+				zap.String("origin", origin))
+			continue
+		}
+		if err := c.AddTrustedOrigin(origin); err != nil {
+			logger.Warn("AI chat ignores a CORS origin it cannot parse", zap.Error(err))
+		}
+	}
+	return c
+}
+
+// requireJSONBody refuses a POST whose Content-Type is not application/json,
+// before next reads the body. Only methods next accepts are checked, so others
+// still get next's own answer.
+func requireJSONBody(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+			if err != nil || mediaType != "application/json" {
+				http.Error(w, "Content-Type must be application/json", http.StatusUnsupportedMediaType)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // guarded puts next behind the auth middleware when there is one.

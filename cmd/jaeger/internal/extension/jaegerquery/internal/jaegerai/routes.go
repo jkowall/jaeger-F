@@ -29,9 +29,12 @@ type RegisterParams struct {
 	// configuration does not set one.
 	HTTPEndpoint string
 	TLSEnabled   bool
-	QueryService *querysvc.QueryService
-	Tenancy      *tenancy.Manager
-	Telemetry    telemetry.Settings
+	// TrustedOrigins is the query server's http.cors.allowed_origins; see
+	// HandlerParams.TrustedOrigins.
+	TrustedOrigins []string
+	QueryService   *querysvc.QueryService
+	Tenancy        *tenancy.Manager
+	Telemetry      telemetry.Settings
 }
 
 // Routes is what Register hands back to the query server: a closer for what
@@ -133,6 +136,7 @@ func Register(ctx context.Context, r *http.ServeMux, p RegisterParams) (*Routes,
 			MCP:                mcpHandler,
 			MCPBaseURL:         aiCfg.ResolveMCPBaseURL(ctx, p.HTTPEndpoint, p.TLSEnabled),
 			AuthMiddleware:     authWrap,
+			TrustedOrigins:     p.TrustedOrigins,
 		})
 		aiGateway.RegisterRoutes(r)
 	}

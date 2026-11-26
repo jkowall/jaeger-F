@@ -295,7 +295,12 @@ Jaeger does not detect that.
 `ai.agent_headers`. The chat body limit defaults to 1 MiB. The gateway
 also mounts `/api/ai/mcp/<id>/` on the same MCP server and can dispatch
 per-turn UI tools into the browser session that opened the chat. Anyone who
-can reach the query port can open these routes. The embedded all-in-one
+can reach the query port can open these routes. Both refuse a browser
+request from another origin, judged by `Sec-Fetch-Site` or `Origin`, unless
+the origin is listed exactly in `http.cors.allowed_origins`; wildcard entries
+are not trusted. Chat also refuses a POST whose `Content-Type` is not
+`application/json`, so a page cannot start a turn with a simple request
+that skips the CORS preflight. The embedded all-in-one
 `ai:` block does not clear `agent_url`, so the factory default
 `ws://localhost:16688` stays and these routes are mounted.
 `cmd/jaeger/config.yaml` sets that same URL explicitly and also enables
