@@ -64,6 +64,12 @@ func TestRegisterTools(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, listed.Tools)
 
+	names := make([]string, 0, len(listed.Tools))
+	for _, tool := range listed.Tools {
+		names = append(names, tool.Name)
+	}
+	assert.ElementsMatch(t, ToolNames(), names, "ToolNames must list exactly the registered tools")
+
 	for _, tool := range listed.Tools {
 		assert.Regexp(t, toolNamePattern, tool.Name)
 		assert.NotEmpty(t, tool.Description, tool.Name)

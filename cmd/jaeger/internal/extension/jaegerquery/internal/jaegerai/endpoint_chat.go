@@ -179,7 +179,7 @@ func (h *chatEndpoint) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	grant, closeTurn := h.turns.register(run, rawUITools)
 	defer closeTurn()
 
-	acpConn := acp.NewClientSideConnection(newACPClient(run), adapter, adapter)
+	acpConn := acp.NewClientSideConnection(newACPClient(run, h.Logger), adapter, adapter)
 
 	init, err := acpConn.Initialize(acpCtx, acp.InitializeRequest{
 		ProtocolVersion: acp.ProtocolVersionNumber,

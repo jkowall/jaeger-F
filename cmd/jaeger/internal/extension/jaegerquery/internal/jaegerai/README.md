@@ -90,9 +90,15 @@ turn's `aguiRun`.
   a notification is the name the agent was offered, so a UI tool arrives with
   `UIToolPrefix`, which is stripped before the event reaches the browser.
 - **`RequestPermission`.** Answers `session/request_permission` by selecting the
-  first option of kind `allow_once` or `allow_always`, and cancels if the agent
-  offers neither. The gateway advertises no filesystem or terminal capability in
-  `Initialize`, so a well-behaved agent has nothing else to ask about.
+  `allow_once` option only for a call to a tool the gateway serves: a Jaeger
+  telemetry tool or a `ui__` tool, named bare or under the `jaeger` MCP server
+  name, with a read-only tool kind and no command or subagent task in its
+  input. Every other request is cancelled and logged at warn level, and so is
+  a request that offers no `allow_once`. The chat caller writes the prompt, so
+  approving a tool of the agent's own, such as a shell or file edit, would run
+  what the caller asks on the agent's host. Run the agent with its built-in
+  tools turned off; the gateway refuses them, but an agent that runs a tool
+  without asking is not stopped by it.
 - **Filesystem and terminal operations** return an error, because the gateway
   advertises those capabilities as disabled.
 

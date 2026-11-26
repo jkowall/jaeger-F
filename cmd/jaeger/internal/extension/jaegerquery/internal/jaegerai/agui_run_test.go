@@ -17,6 +17,8 @@ import (
 	"github.com/coder/acp-go-sdk"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 type errResponseWriter struct {
@@ -287,91 +289,166 @@ func TestAGUIRunEnsureTextStartIsIdempotent(t *testing.T) {
 	assert.Equal(t, []string{"TEXT_MESSAGE_START"}, types, "ensureTextStart should only emit once per open message")
 }
 
-func TestACPClientRequestPermissionAcceptsAllowOnce(t *testing.T) {
-	// Agents like the Claude Agent SDK route every tool call through a
-	// session/request_permission RPC. The gateway already curates which
-	// tools the agent can invoke (operator-configured MCP + frontend-
-	// declared contextual tools), and AG-UI has no per-call permission
-	// event to bubble up — so the gateway must select an allow option
-	// rather than cancel, which Claude treats as "Tool use aborted".
-	c := &acpClient{}
-
-	resp, err := c.RequestPermission(context.Background(), acp.RequestPermissionRequest{
-		Options: []acp.PermissionOption{{
-			OptionId: "opt-1",
-			Name:     "allow once",
-			Kind:     acp.PermissionOptionKindAllowOnce,
-		}},
-	})
-	require.NoError(t, err)
-	require.NotNil(t, resp.Outcome.Selected, "expected allow-kind option to be selected")
-	require.Nil(t, resp.Outcome.Cancelled, "must not cancel when an allow option is offered")
-	assert.Equal(t, acp.PermissionOptionId("opt-1"), resp.Outcome.Selected.OptionId)
-}
-
-func TestACPClientRequestPermissionPicksFirstAllowOption(t *testing.T) {
-	// Agents typically present a list like [allow_once, allow_always,
-	// reject_once]. Order-preserving "first allow wins" keeps the agent's
-	// suggested ordering authoritative — the gateway has no preference
-	// between scopes, so don't impose one.
-	c := &acpClient{}
-
-	resp, err := c.RequestPermission(context.Background(), acp.RequestPermissionRequest{
+// gatewayToolPermission builds a permission request for a call to a gateway
+// tool, with options offered as agents usually do.
+func gatewayToolPermission(title string, kind *acp.ToolKind, rawInput any) acp.RequestPermissionRequest {
+	return acp.RequestPermissionRequest{
+		ToolCall: acp.ToolCallUpdate{
+			ToolCallId: "call-1",
+			Title:      &title,
+			Kind:       kind,
+			RawInput:   rawInput,
+		},
 		Options: []acp.PermissionOption{
 			{OptionId: "reject", Name: "reject", Kind: acp.PermissionOptionKindRejectOnce},
-			{OptionId: "once", Name: "allow once", Kind: acp.PermissionOptionKindAllowOnce},
 			{OptionId: "always", Name: "allow always", Kind: acp.PermissionOptionKindAllowAlways},
+			{OptionId: "once", Name: "allow once", Kind: acp.PermissionOptionKindAllowOnce},
 		},
-	})
-	require.NoError(t, err)
-	require.NotNil(t, resp.Outcome.Selected)
-	assert.Equal(t, acp.PermissionOptionId("once"), resp.Outcome.Selected.OptionId,
-		"first allow-kind option must be chosen, skipping any preceding reject options")
+	}
 }
 
-func TestACPClientRequestPermissionAcceptsAllowAlwaysWhenNoOnce(t *testing.T) {
-	// Some agents may only offer allow_always (e.g. for tools they consider
-	// safe to remember). Accept that too — both kinds are "yes."
-	c := &acpClient{}
+func TestACPClientRequestPermissionApprovesGatewayToolsOnce(t *testing.T) {
+	// Agents like the Claude Agent SDK route every tool call, MCP calls
+	// included, through session/request_permission and abort a cancelled call
+	// as "Tool use aborted", so the gateway's own tools must be approved. The
+	// approval is allow_once even when allow_always comes first.
+	for _, title := range []string{
+		"get_services",
+		"read_skill",
+		"jaeger: get_services",
+		"mcp__jaeger__find_traces",
+		"jaeger__get_trace_errors",
+		"jaeger/find_spans",
+		"jaeger.get_critical_path",
+		UIToolPrefix + "show_chart",
+		"jaeger: " + UIToolPrefix + "show_chart",
+	} {
+		t.Run(title, func(t *testing.T) {
+			c := newACPClient(nil, zap.NewNop())
+			resp, err := c.RequestPermission(context.Background(),
+				gatewayToolPermission(title, acp.Ptr(acp.ToolKindOther), map[string]any{"pattern": "checkout"}))
+			require.NoError(t, err)
+			require.Nil(t, resp.Outcome.Cancelled)
+			require.NotNil(t, resp.Outcome.Selected)
+			assert.Equal(t, acp.PermissionOptionId("once"), resp.Outcome.Selected.OptionId)
+		})
+	}
+}
 
-	resp, err := c.RequestPermission(context.Background(), acp.RequestPermissionRequest{
-		Options: []acp.PermissionOption{{
-			OptionId: "always",
-			Name:     "allow always",
-			Kind:     acp.PermissionOptionKindAllowAlways,
+func TestACPClientRequestPermissionApprovesWithoutKindOrInput(t *testing.T) {
+	c := newACPClient(nil, zap.NewNop())
+	resp, err := c.RequestPermission(context.Background(), gatewayToolPermission("get_services", nil, nil))
+	require.NoError(t, err)
+	require.NotNil(t, resp.Outcome.Selected)
+	assert.Equal(t, acp.PermissionOptionId("once"), resp.Outcome.Selected.OptionId)
+}
+
+func TestACPClientRequestPermissionRefusesOtherTools(t *testing.T) {
+	// A chat caller writes the prompt that drives the agent, so approving a
+	// tool of the agent's own would run what the caller asks on the agent's
+	// host. Each refusal is cancelled and logged.
+	tests := []struct {
+		name   string
+		req    acp.RequestPermissionRequest
+		reason string
+	}{
+		{
+			name:   "no title",
+			req:    acp.RequestPermissionRequest{ToolCall: acp.ToolCallUpdate{ToolCallId: "call-1"}, Options: gatewayToolPermission("x", nil, nil).Options},
+			reason: "tool call has no title",
+		},
+		{
+			name:   "agent shell tool",
+			req:    gatewayToolPermission("Bash", acp.Ptr(acp.ToolKindExecute), map[string]any{"command": "placeholder"}),
+			reason: "not a tool served by the gateway",
+		},
+		{
+			name:   "tool of another MCP server",
+			req:    gatewayToolPermission("other: get_services", acp.Ptr(acp.ToolKindOther), nil),
+			reason: "not a tool served by the gateway",
+		},
+		{
+			name:   "UI prefix without a name",
+			req:    gatewayToolPermission(UIToolPrefix, acp.Ptr(acp.ToolKindOther), nil),
+			reason: "not a tool served by the gateway",
+		},
+		{
+			name:   "UI name with characters MCP does not allow",
+			req:    gatewayToolPermission(UIToolPrefix+"show chart", acp.Ptr(acp.ToolKindOther), nil),
+			reason: "not a tool served by the gateway",
+		},
+		{
+			name:   "gateway title on an execute call",
+			req:    gatewayToolPermission("get_services", acp.Ptr(acp.ToolKindExecute), nil),
+			reason: "tool kind is not read-only",
+		},
+		{
+			name:   "gateway title on a subagent call",
+			req:    gatewayToolPermission("get_services", acp.Ptr(acp.ToolKindThink), map[string]any{"prompt": "placeholder"}),
+			reason: "tool kind is not read-only",
+		},
+		{
+			name:   "input that is not an object",
+			req:    gatewayToolPermission("get_services", acp.Ptr(acp.ToolKindOther), "placeholder"),
+			reason: "tool input is not an object",
+		},
+		{
+			name:   "input that names a command",
+			req:    gatewayToolPermission("get_services", acp.Ptr(acp.ToolKindOther), map[string]any{"Command": "placeholder"}),
+			reason: "tool input carries a command or task",
+		},
+		{
+			name: "subagent call titled with its description and no kind",
+			req: gatewayToolPermission("get_services", nil, map[string]any{
+				"description": "get_services",
+				"prompt":      "placeholder",
+			}),
+			reason: "tool input carries a command or task",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			core, logs := observer.New(zap.WarnLevel)
+			c := newACPClient(nil, zap.New(core))
+			resp, err := c.RequestPermission(context.Background(), tt.req)
+			require.NoError(t, err)
+			require.NotNil(t, resp.Outcome.Cancelled)
+			require.Nil(t, resp.Outcome.Selected)
+			entries := logs.FilterMessage("Refused agent tool permission request").All()
+			require.Len(t, entries, 1)
+			assert.Equal(t, tt.reason, entries[0].ContextMap()["reason"])
+		})
+	}
+}
+
+func TestACPClientRequestPermissionCancelsWithoutAllowOnce(t *testing.T) {
+	// An allow_always approval would let later calls skip the check, and a
+	// reject option is never promoted to an allow.
+	tests := []struct {
+		name    string
+		options []acp.PermissionOption
+	}{
+		{name: "no options"},
+		{name: "only allow_always", options: []acp.PermissionOption{
+			{OptionId: "always", Kind: acp.PermissionOptionKindAllowAlways},
 		}},
-	})
-	require.NoError(t, err)
-	require.NotNil(t, resp.Outcome.Selected)
-	assert.Equal(t, acp.PermissionOptionId("always"), resp.Outcome.Selected.OptionId)
-}
-
-func TestACPClientRequestPermissionCancelsWhenNoOptions(t *testing.T) {
-	// Defensive: with no options to choose from there's nothing to accept,
-	// so fall through to cancelled rather than fabricate an option id.
-	c := &acpClient{}
-
-	resp, err := c.RequestPermission(context.Background(), acp.RequestPermissionRequest{})
-	require.NoError(t, err)
-	require.NotNil(t, resp.Outcome.Cancelled, "no options → cancelled")
-	require.Nil(t, resp.Outcome.Selected)
-}
-
-func TestACPClientRequestPermissionCancelsWhenOnlyRejectOptions(t *testing.T) {
-	// A misconfigured or hostile agent that only presents reject options
-	// cannot be coerced into an allow — the gateway falls through to
-	// cancelled so the tool call is aborted instead of forced.
-	c := &acpClient{}
-
-	resp, err := c.RequestPermission(context.Background(), acp.RequestPermissionRequest{
-		Options: []acp.PermissionOption{
+		{name: "only reject options", options: []acp.PermissionOption{
 			{OptionId: "reject-once", Kind: acp.PermissionOptionKindRejectOnce},
 			{OptionId: "reject-always", Kind: acp.PermissionOptionKindRejectAlways},
-		},
-	})
-	require.NoError(t, err)
-	require.NotNil(t, resp.Outcome.Cancelled)
-	require.Nil(t, resp.Outcome.Selected, "must not promote a reject option to an allow")
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := gatewayToolPermission("get_services", acp.Ptr(acp.ToolKindOther), nil)
+			req.Options = tt.options
+			core, logs := observer.New(zap.WarnLevel)
+			resp, err := newACPClient(nil, zap.New(core)).RequestPermission(context.Background(), req)
+			require.NoError(t, err)
+			require.NotNil(t, resp.Outcome.Cancelled)
+			require.Nil(t, resp.Outcome.Selected)
+			assert.Equal(t, 1, logs.FilterField(zap.String("reason", "agent offered no allow_once option")).Len())
+		})
+	}
 }
 
 func TestACPClientSessionUpdateAgentMessageChunkEmitsTextContent(t *testing.T) {
@@ -379,7 +456,7 @@ func TestACPClientSessionUpdateAgentMessageChunkEmitsTextContent(t *testing.T) {
 	c := newAGUIRun(context.Background(), rec, "thread-1", "run-1")
 	c.startRun()
 
-	err := newACPClient(c).SessionUpdate(context.Background(), acp.SessionNotification{
+	err := newACPClient(c, zap.NewNop()).SessionUpdate(context.Background(), acp.SessionNotification{
 		Update: acp.SessionUpdate{
 			AgentMessageChunk: &acp.SessionUpdateAgentMessageChunk{Content: acp.TextBlock("hello world")},
 		},
@@ -406,7 +483,7 @@ func TestACPClientSessionUpdateAgentMessageChunkSkipsEmptyText(t *testing.T) {
 	rec := httptest.NewRecorder()
 	c := newAGUIRun(context.Background(), rec, "thread-1", "run-1")
 
-	err := newACPClient(c).SessionUpdate(context.Background(), acp.SessionNotification{
+	err := newACPClient(c, zap.NewNop()).SessionUpdate(context.Background(), acp.SessionNotification{
 		Update: acp.SessionUpdate{
 			AgentMessageChunk: &acp.SessionUpdateAgentMessageChunk{Content: acp.TextBlock("")},
 		},
@@ -445,7 +522,7 @@ func sendAgentText(t *testing.T, c *aguiRun, text string) {
 
 func sendAgentContent(t *testing.T, c *aguiRun, content acp.ContentBlock) {
 	t.Helper()
-	err := newACPClient(c).SessionUpdate(context.Background(), acp.SessionNotification{
+	err := newACPClient(c, zap.NewNop()).SessionUpdate(context.Background(), acp.SessionNotification{
 		Update: acp.SessionUpdate{
 			AgentMessageChunk: &acp.SessionUpdateAgentMessageChunk{Content: content},
 		},
@@ -522,7 +599,7 @@ func TestACPClientSessionUpdateKeepsWhitespaceChunks(t *testing.T) {
 func TestAGUIRunWhitespaceAroundToolCall(t *testing.T) {
 	toolCall := func(c *aguiRun) {
 		t.Helper()
-		err := newACPClient(c).SessionUpdate(context.Background(), acp.SessionNotification{
+		err := newACPClient(c, zap.NewNop()).SessionUpdate(context.Background(), acp.SessionNotification{
 			Update: acp.SessionUpdate{
 				ToolCall: &acp.SessionUpdateToolCall{
 					ToolCallId: "tool-1",
@@ -636,7 +713,7 @@ func TestACPClientSessionUpdateAgentMessageChunkPreservesInternalWhitespace(t *t
 	c := newAGUIRun(context.Background(), rec, "thread-1", "run-1")
 	c.startRun()
 
-	err := newACPClient(c).SessionUpdate(context.Background(), acp.SessionNotification{
+	err := newACPClient(c, zap.NewNop()).SessionUpdate(context.Background(), acp.SessionNotification{
 		Update: acp.SessionUpdate{
 			AgentMessageChunk: &acp.SessionUpdateAgentMessageChunk{Content: acp.TextBlock(" world ")},
 		},
@@ -655,7 +732,7 @@ func TestACPClientSessionUpdateToolCallEmitsStartAndArgs(t *testing.T) {
 	rec := httptest.NewRecorder()
 	c := newAGUIRun(context.Background(), rec, "thread-1", "run-1")
 
-	err := newACPClient(c).SessionUpdate(context.Background(), acp.SessionNotification{
+	err := newACPClient(c, zap.NewNop()).SessionUpdate(context.Background(), acp.SessionNotification{
 		Update: acp.SessionUpdate{
 			ToolCall: &acp.SessionUpdateToolCall{
 				ToolCallId: "tool-1",
@@ -697,7 +774,7 @@ func TestAGUIRunToolCallClosesTextAndStartsNewMessage(t *testing.T) {
 			name: "ACP tool call",
 			toolCall: func(t *testing.T, c *aguiRun) {
 				t.Helper()
-				err := newACPClient(c).SessionUpdate(context.Background(), acp.SessionNotification{
+				err := newACPClient(c, zap.NewNop()).SessionUpdate(context.Background(), acp.SessionNotification{
 					Update: acp.SessionUpdate{
 						ToolCall: &acp.SessionUpdateToolCall{
 							ToolCallId: "tool-1",
@@ -771,7 +848,7 @@ func TestACPClientSessionUpdateToolCallStripsUIPrefixForName(t *testing.T) {
 	// The agent reports progress under the name the MCP endpoint advertised,
 	// which for a UI tool carries UIToolPrefix. The frontend registered it under
 	// the bare name, so TOOL_CALL_START.toolCallName must be stripped.
-	err := newACPClient(c).SessionUpdate(context.Background(), acp.SessionNotification{
+	err := newACPClient(c, zap.NewNop()).SessionUpdate(context.Background(), acp.SessionNotification{
 		Update: acp.SessionUpdate{
 			ToolCall: &acp.SessionUpdateToolCall{
 				ToolCallId: "tool-2",
@@ -793,7 +870,7 @@ func TestACPClientSessionUpdateToolCallUpdateEmitsResultAndEnd(t *testing.T) {
 	c := newAGUIRun(context.Background(), rec, "thread-1", "run-1")
 
 	completed := acp.ToolCallStatusCompleted
-	err := newACPClient(c).SessionUpdate(context.Background(), acp.SessionNotification{
+	err := newACPClient(c, zap.NewNop()).SessionUpdate(context.Background(), acp.SessionNotification{
 		Update: acp.SessionUpdate{
 			ToolCallUpdate: &acp.SessionToolCallUpdate{
 				ToolCallId: "tool-1",
@@ -832,7 +909,7 @@ func TestACPClientSessionUpdateToolCallUpdateFlattensMCPEnvelope(t *testing.T) {
 	completed := acp.ToolCallStatusCompleted
 	// Sidecar forwards MCP CallToolResult envelopes verbatim. The handler
 	// must concatenate the text blocks so AG-UI receives content as a string.
-	err := newACPClient(c).SessionUpdate(context.Background(), acp.SessionNotification{
+	err := newACPClient(c, zap.NewNop()).SessionUpdate(context.Background(), acp.SessionNotification{
 		Update: acp.SessionUpdate{
 			ToolCallUpdate: &acp.SessionToolCallUpdate{
 				ToolCallId: "find_traces-1",
@@ -867,7 +944,7 @@ func TestACPClientSessionUpdateToolCallUpdateSkipsEndForInProgress(t *testing.T)
 	c := newAGUIRun(context.Background(), rec, "thread-1", "run-1")
 
 	inProgress := acp.ToolCallStatusInProgress
-	err := newACPClient(c).SessionUpdate(context.Background(), acp.SessionNotification{
+	err := newACPClient(c, zap.NewNop()).SessionUpdate(context.Background(), acp.SessionNotification{
 		Update: acp.SessionUpdate{
 			ToolCallUpdate: &acp.SessionToolCallUpdate{
 				ToolCallId: "tool-1",
