@@ -4,6 +4,8 @@
 package anonymizer
 
 import (
+	"encoding/hex"
+	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -142,11 +144,47 @@ func TestAnonymizer_FilterCustomTags(t *testing.T) {
 	assert.Equal(t, expected, actual)
 }
 
+func TestNew_GeneratesHashKey(t *testing.T) {
+	mappingFile := filepath.Join(t.TempDir(), "mapping.json")
+	first := New(mappingFile, Options{}, zap.NewNop())
+	defer first.Stop()
+	second := New(filepath.Join(t.TempDir(), "mapping.json"), Options{}, zap.NewNop())
+	defer second.Stop()
+
+	key, err := hex.DecodeString(first.mapping.HashKey)
+	require.NoError(t, err)
+	assert.Len(t, key, hashKeySize)
+	assert.NotEqual(t, first.mapping.HashKey, second.mapping.HashKey)
+	assert.NotEqual(t, first.mapServiceName("foobar"), second.mapServiceName("foobar"))
+
+	first.SaveMapping()
+	dat, err := os.ReadFile(mappingFile)
+	require.NoError(t, err)
+	var saved mapping
+	require.NoError(t, json.Unmarshal(dat, &saved))
+	assert.Equal(t, first.mapping.HashKey, saved.HashKey)
+}
+
+func TestNew_ReusesHashKeyFromMappingFile(t *testing.T) {
+	mappingFile := filepath.Join(t.TempDir(), "mapping.json")
+	first := New(mappingFile, Options{}, zap.NewNop())
+	first.Stop()
+	first.SaveMapping()
+
+	second := New(mappingFile, Options{}, zap.NewNop())
+	defer second.Stop()
+	assert.Equal(t, first.mapping.HashKey, second.mapping.HashKey)
+	assert.Equal(t, first.hash("foobar"), second.hash("foobar"))
+}
+
 func TestAnonymizer_Hash(t *testing.T) {
-	data := "foobar"
-	expected := "340d8765a4dda9c2"
-	actual := hash(data)
-	assert.Equal(t, expected, actual)
+	anonymizer := &Anonymizer{mapping: mapping{HashKey: "key"}}
+	other := &Anonymizer{mapping: mapping{HashKey: "other-key"}}
+	actual := anonymizer.hash("foobar")
+	assert.Equal(t, "37508e74cc6edbed", actual)
+	assert.Equal(t, actual, anonymizer.hash("foobar"))
+	assert.NotEqual(t, actual, anonymizer.hash("foobaz"))
+	assert.NotEqual(t, actual, other.hash("foobar"))
 }
 
 func TestAnonymizer_AnonymizeSpan_AllTrue(t *testing.T) {
@@ -200,9 +238,10 @@ func TestAnonymizer_MapString_Present(t *testing.T) {
 func TestAnonymizer_MapString_Absent(t *testing.T) {
 	v := "foobar"
 	m := map[string]string{}
-	anonymizer := &Anonymizer{}
+	anonymizer := &Anonymizer{mapping: mapping{HashKey: "key"}}
 	actual := anonymizer.mapString(v, m)
-	assert.Equal(t, "340d8765a4dda9c2", actual)
+	assert.Equal(t, anonymizer.hash(v), actual)
+	assert.Equal(t, actual, m[v])
 }
 
 func TestAnonymizer_MapServiceName(t *testing.T) {
