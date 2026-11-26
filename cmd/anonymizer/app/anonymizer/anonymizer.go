@@ -6,6 +6,7 @@ package anonymizer
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/jaegertracing/jaeger-idl/model/v1"
+	"github.com/jaegertracing/jaeger/cmd/anonymizer/app/internal/privatefile"
 	"github.com/jaegertracing/jaeger/internal/uimodel"
 	uiconv "github.com/jaegertracing/jaeger/internal/uimodel/converter/v1/json"
 )
@@ -115,7 +117,12 @@ func (a *Anonymizer) SaveMapping() {
 		a.logger.Error("Failed to marshal mapping file", zap.Error(err))
 		return
 	}
-	if err := os.WriteFile(filepath.Clean(a.mappingFile), dat, PermUserRW); err != nil {
+	f, err := privatefile.Create(filepath.Clean(a.mappingFile))
+	if err == nil {
+		_, err = f.Write(dat)
+		err = errors.Join(err, f.Close())
+	}
+	if err != nil {
 		a.logger.Error("Failed to write mapping file", zap.Error(err))
 		return
 	}

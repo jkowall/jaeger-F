@@ -4,6 +4,9 @@
 package app
 
 import (
+	"os"
+	"path/filepath"
+
 	"github.com/spf13/cobra"
 )
 
@@ -32,7 +35,21 @@ const (
 	maxSpansCount         = "max-spans-count"
 	startTime             = "start-time"
 	endTime               = "end-time"
+
+	outputDirName = "jaeger-anonymizer"
 )
+
+// DefaultOutputDir returns a directory under the operator's home directory,
+// or a directory relative to the working directory if the home is unknown.
+// The captured trace is not anonymized, so it must not default to a shared
+// location such as /tmp.
+func DefaultOutputDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return outputDirName
+	}
+	return filepath.Join(home, outputDirName)
+}
 
 // AddFlags adds flags for anonymizer main program
 func (o *Options) AddFlags(command *cobra.Command) {
@@ -45,7 +62,7 @@ func (o *Options) AddFlags(command *cobra.Command) {
 	command.Flags().StringVar(
 		&o.OutputDir,
 		outputDirFlag,
-		"/tmp",
+		DefaultOutputDir(),
 		"The directory to store the anonymized trace",
 	)
 	command.Flags().StringVar(
