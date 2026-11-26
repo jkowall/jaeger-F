@@ -1231,6 +1231,7 @@ func TestInitRouter_HeaderForwardingReachesAgentHandshake(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, cs.Close()) })
 
 	req := httptest.NewRequest(http.MethodPost, "/api/ai/chat", strings.NewReader(`{"messages":[{"role":"user","content":"hello"}]}`))
+	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Identity-Token", "tok-123")
 	req.Header.Set("X-User", "alice")
 	req.Header.Set("X-Caller", "alice")
@@ -1285,6 +1286,7 @@ func TestInitRouterAIHandlerRegistration(t *testing.T) {
 		})
 
 		req := httptest.NewRequest(http.MethodPost, "/api/ai/chat", strings.NewReader(`{"messages":[{"role":"user","content":"hello"}]}`))
+		req.Header.Set("Content-Type", "application/json")
 		rr := httptest.NewRecorder()
 		handler.ServeHTTP(rr, req)
 
@@ -1303,10 +1305,35 @@ func TestInitRouterAIHandlerRegistration(t *testing.T) {
 		})
 
 		req := httptest.NewRequest(http.MethodPost, "/jaeger/api/ai/chat", strings.NewReader(`{"messages":[{"role":"user","content":"hello"}]}`))
+		req.Header.Set("Content-Type", "application/json")
 		rr := httptest.NewRecorder()
 		handler.ServeHTTP(rr, req)
 
 		require.Equal(t, http.StatusBadGateway, rr.Code)
+	})
+
+	t.Run("ai chat trusts the http cors allowed origins and refuses other origins", func(t *testing.T) {
+		opts := DefaultQueryOptions()
+		opts.HTTP.CORS = configoptional.Some(confighttp.CORSConfig{AllowedOrigins: []string{"https://ui.example"}})
+		opts.AI = configoptional.Some(jaegerai.Config{AgentURL: "ws://127.0.0.1:1", MaxRequestBodySize: 1 << 20})
+
+		handler, cs, err := initRouter(context.Background(), querySvc.qs, nil, &opts, noBackendCaps, tenancyMgr, telset)
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			require.NoError(t, cs.Close())
+		})
+
+		chatFrom := func(origin string) int {
+			req := httptest.NewRequest(http.MethodPost, "/api/ai/chat", strings.NewReader(`{"messages":[{"role":"user","content":"hello"}]}`))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Origin", origin)
+			req.Header.Set("Sec-Fetch-Site", "cross-site")
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, req)
+			return rr.Code
+		}
+		require.Equal(t, http.StatusBadGateway, chatFrom("https://ui.example"), "a trusted origin reaches the agent dial")
+		require.Equal(t, http.StatusForbidden, chatFrom("https://attacker.example"))
 	})
 
 	// An unusable skills_dir is broken configuration, so it has to stop the
@@ -1388,7 +1415,8 @@ func TestInitRouterAIHandlerRegistration(t *testing.T) {
 
 		serve := func(method, path string, header http.Header) *httptest.ResponseRecorder {
 			req := httptest.NewRequest(method, path, strings.NewReader(`{}`))
-			req.Header = header
+			req.Header = header.Clone()
+			req.Header.Set("Content-Type", "application/json")
 			rr := httptest.NewRecorder()
 			handler.ServeHTTP(rr, req)
 			return rr

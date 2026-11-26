@@ -17,6 +17,7 @@ import (
 	"go.opentelemetry.io/collector/config/configauth"
 	"go.opentelemetry.io/collector/config/confighttp"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/jaegertracing/jaeger/internal/headerforwarding"
 )
@@ -237,4 +238,186 @@ func TestAuthMiddlewareGuardsChatAndTurnScopedEndpoints(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, toolNames(listed.Tools), "get_services",
 		"the announced headers pass the authenticator and the turn check")
+}
+
+// chatRouteHarness mounts a Handler whose agent records the prompt it was sent,
+// so a test can tell a refused chat request from one that started a turn.
+func chatRouteHarness(t *testing.T, trustedOrigins []string) (*http.ServeMux, *mockACPAgent) {
+	t.Helper()
+	agent := &mockACPAgent{}
+	wsURL, cleanup := startMockACPWebSocketServer(t, agent)
+	t.Cleanup(cleanup)
+	h := NewHandler(HandlerParams{
+		Logger:             zap.NewNop(),
+		AgentURL:           wsURL,
+		MaxRequestBodySize: 1 << 20,
+		TrustedOrigins:     trustedOrigins,
+	})
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+	return mux, agent
+}
+
+func chatRouteRequest(method, contentType string, header http.Header) *http.Request {
+	req := httptest.NewRequest(method, routeChat,
+		strings.NewReader(`{"messages":[{"id":"1","role":"user","content":"hello"}]}`))
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	for name, values := range header {
+		req.Header[name] = values
+	}
+	return req
+}
+
+func TestChatRouteRefusesCrossSiteRequests(t *testing.T) {
+	// httptest.NewRequest addresses example.com, so this is the route's own origin.
+	const ownOrigin = "http://example.com"
+	crossSite := func(origin string) http.Header {
+		return http.Header{"Origin": {origin}, "Sec-Fetch-Site": {"cross-site"}}
+	}
+	tests := []struct {
+		name           string
+		method         string
+		contentType    string
+		header         http.Header
+		trustedOrigins []string
+		wantStatus     int
+	}{
+		{
+			name:        "cross-site text/plain",
+			method:      http.MethodPost,
+			contentType: "text/plain;charset=UTF-8",
+			header:      crossSite("https://attacker.example"),
+			wantStatus:  http.StatusForbidden,
+		},
+		{
+			name:        "cross-site application/json",
+			method:      http.MethodPost,
+			contentType: "application/json",
+			header:      crossSite("https://attacker.example"),
+			wantStatus:  http.StatusForbidden,
+		},
+		{
+			name:        "same-site is still another origin",
+			method:      http.MethodPost,
+			contentType: "application/json",
+			header:      http.Header{"Origin": {"http://example.com:9999"}, "Sec-Fetch-Site": {"same-site"}},
+			wantStatus:  http.StatusForbidden,
+		},
+		{
+			name:        "origin that does not match the host, without fetch metadata",
+			method:      http.MethodPost,
+			contentType: "application/json",
+			header:      http.Header{"Origin": {"https://attacker.example"}},
+			wantStatus:  http.StatusForbidden,
+		},
+		{
+			name:        "form post from the same origin",
+			method:      http.MethodPost,
+			contentType: "application/x-www-form-urlencoded",
+			header:      http.Header{"Origin": {ownOrigin}, "Sec-Fetch-Site": {"same-origin"}},
+			wantStatus:  http.StatusUnsupportedMediaType,
+		},
+		{
+			name:       "no content type",
+			method:     http.MethodPost,
+			wantStatus: http.StatusUnsupportedMediaType,
+		},
+		{
+			name:        "malformed content type",
+			method:      http.MethodPost,
+			contentType: "application/json; =",
+			wantStatus:  http.StatusUnsupportedMediaType,
+		},
+		{
+			name:           "wildcard CORS origin is not trusted",
+			method:         http.MethodPost,
+			contentType:    "application/json",
+			header:         crossSite("https://ui.example"),
+			trustedOrigins: []string{"https://*.example", "*"},
+			wantStatus:     http.StatusForbidden,
+		},
+		{
+			name:       "GET still gets the chat endpoint's own answer",
+			method:     http.MethodGet,
+			wantStatus: http.StatusMethodNotAllowed,
+		},
+		{
+			name:        "same-origin application/json",
+			method:      http.MethodPost,
+			contentType: "application/json; charset=utf-8",
+			header:      http.Header{"Origin": {ownOrigin}, "Sec-Fetch-Site": {"same-origin"}},
+			wantStatus:  http.StatusOK,
+		},
+		{
+			name:        "non-browser application/json",
+			method:      http.MethodPost,
+			contentType: "application/json",
+			wantStatus:  http.StatusOK,
+		},
+		{
+			name:           "trusted CORS origin",
+			method:         http.MethodPost,
+			contentType:    "application/json",
+			header:         crossSite("https://ui.example"),
+			trustedOrigins: []string{"https://ui.example", "not an origin"},
+			wantStatus:     http.StatusOK,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mux, agent := chatRouteHarness(t, tt.trustedOrigins)
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, chatRouteRequest(tt.method, tt.contentType, tt.header))
+			require.Equal(t, tt.wantStatus, rr.Code, "body=%q", rr.Body.String())
+			_, _, prompt := agent.snapshot()
+			if tt.wantStatus == http.StatusOK {
+				require.NotNil(t, prompt, "an admitted request starts a turn")
+				return
+			}
+			assert.Nil(t, prompt, "a refused request must not reach the agent")
+			assert.NotEqual(t, "text/event-stream", rr.Header().Get("Content-Type"))
+		})
+	}
+}
+
+func TestNewCrossOriginProtectionWarnsAboutSkippedOrigins(t *testing.T) {
+	core, logs := observer.New(zap.WarnLevel)
+	c := newCrossOriginProtection(zap.New(core), []string{"https://ui.example", "https://*.example", "not an origin"})
+	require.Equal(t, 2, logs.Len())
+	assert.Equal(t, "https://*.example", logs.All()[0].ContextMap()["origin"])
+
+	req := httptest.NewRequest(http.MethodPost, "/", http.NoBody)
+	req.Header.Set("Sec-Fetch-Site", "cross-site")
+	req.Header.Set("Origin", "https://ui.example")
+	require.NoError(t, c.Check(req))
+	req.Header.Set("Origin", "https://a.example")
+	require.Error(t, c.Check(req))
+}
+
+// The agent dials the turn-scoped endpoint without browser headers, so it is
+// unaffected; a browser request from another origin is refused there too.
+func TestTurnScopedEndpointRefusesCrossSiteRequests(t *testing.T) {
+	h := mcpEnabledHandler(t, "")
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+	grant := registerTurn(h.mcp.turns, testAGUIRun(), nil)
+
+	post := func(header http.Header) int {
+		req := httptest.NewRequest(http.MethodPost, routeMCPPrefix+grant.routeID+"/", strings.NewReader(`{}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(turnTokenHeader, grant.token)
+		for name, values := range header {
+			req.Header[name] = values
+		}
+		rr := httptest.NewRecorder()
+		mux.ServeHTTP(rr, req)
+		return rr.Code
+	}
+	assert.Equal(t, http.StatusForbidden, post(http.Header{
+		"Origin":         {"https://attacker.example"},
+		"Sec-Fetch-Site": {"cross-site"},
+	}))
+	assert.NotEqual(t, http.StatusForbidden, post(nil))
 }

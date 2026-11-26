@@ -43,7 +43,9 @@ func TestRegister(t *testing.T) {
 	}
 	status := func(r *http.ServeMux, method, path string) int {
 		rr := httptest.NewRecorder()
-		r.ServeHTTP(rr, httptest.NewRequest(method, path, strings.NewReader(`{}`)))
+		req := httptest.NewRequest(method, path, strings.NewReader(`{}`))
+		req.Header.Set("Content-Type", "application/json")
+		r.ServeHTTP(rr, req)
 		return rr.Code
 	}
 
