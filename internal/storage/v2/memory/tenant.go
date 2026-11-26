@@ -34,6 +34,12 @@ type Tenant struct {
 
 	services   map[string]struct{}
 	operations map[string]map[tracestore.Operation]struct{}
+
+	// serviceRefs and operationRefs count the resource spans and spans in the
+	// ring that carry each name, so that a name leaves services and operations
+	// once the last trace carrying it is overwritten.
+	serviceRefs   map[string]int
+	operationRefs map[string]map[tracestore.Operation]int
 }
 
 type traceAndId struct {
@@ -73,12 +79,79 @@ func (t traceAndId) traceIsBetweenStartAndEnd(startTime time.Time, endTime time.
 
 func newTenant(cfg *Configuration) *Tenant {
 	return &Tenant{
-		config:     cfg,
-		ids:        make(map[pcommon.TraceID]int),
-		traces:     make([]traceAndId, cfg.MaxTraces),
-		mostRecent: -1,
-		services:   map[string]struct{}{},
-		operations: map[string]map[tracestore.Operation]struct{}{},
+		config:        cfg,
+		ids:           make(map[pcommon.TraceID]int),
+		traces:        make([]traceAndId, cfg.MaxTraces),
+		mostRecent:    -1,
+		services:      map[string]struct{}{},
+		operations:    map[string]map[tracestore.Operation]struct{}{},
+		serviceRefs:   map[string]int{},
+		operationRefs: map[string]map[tracestore.Operation]int{},
+	}
+}
+
+func spanOperation(span ptrace.Span) tracestore.Operation {
+	return tracestore.Operation{
+		Name:     span.Name(),
+		SpanKind: fromOTELSpanKind(span.Kind()),
+	}
+}
+
+// indexNames takes one reference on the service name of each resource span in
+// rss and one on the operation of each span. unindexNames must later be called
+// with the same spans to release exactly those references.
+func (t *Tenant) indexNames(rss ptrace.ResourceSpansSlice) {
+	for _, resourceSpan := range rss.All() {
+		serviceName := getServiceNameFromResource(resourceSpan.Resource())
+		if serviceName == "" {
+			continue
+		}
+		t.serviceRefs[serviceName]++
+		t.services[serviceName] = struct{}{}
+		opRefs, ok := t.operationRefs[serviceName]
+		if !ok {
+			opRefs = make(map[tracestore.Operation]int)
+			t.operationRefs[serviceName] = opRefs
+			t.operations[serviceName] = make(map[tracestore.Operation]struct{})
+		}
+		ops := t.operations[serviceName]
+		for _, scopeSpan := range resourceSpan.ScopeSpans().All() {
+			for _, span := range scopeSpan.Spans().All() {
+				operation := spanOperation(span)
+				opRefs[operation]++
+				ops[operation] = struct{}{}
+			}
+		}
+	}
+}
+
+// unindexNames releases the references indexNames took for rss, dropping each
+// name whose last reference it releases.
+func (t *Tenant) unindexNames(rss ptrace.ResourceSpansSlice) {
+	for _, resourceSpan := range rss.All() {
+		serviceName := getServiceNameFromResource(resourceSpan.Resource())
+		if serviceName == "" {
+			continue
+		}
+		opRefs := t.operationRefs[serviceName]
+		ops := t.operations[serviceName]
+		for _, scopeSpan := range resourceSpan.ScopeSpans().All() {
+			for _, span := range scopeSpan.Spans().All() {
+				operation := spanOperation(span)
+				opRefs[operation]--
+				if opRefs[operation] <= 0 {
+					delete(opRefs, operation)
+					delete(ops, operation)
+				}
+			}
+		}
+		t.serviceRefs[serviceName]--
+		if t.serviceRefs[serviceName] <= 0 {
+			delete(t.serviceRefs, serviceName)
+			delete(t.services, serviceName)
+			delete(t.operationRefs, serviceName)
+			delete(t.operations, serviceName)
+		}
 	}
 }
 
@@ -88,23 +161,10 @@ func (t *Tenant) storeTraces(tracesById map[pcommon.TraceID]ptrace.ResourceSpans
 	for traceId, sameTraceIDResourceSpan := range tracesById {
 		var startTime time.Time
 		var endTime time.Time
+		t.indexNames(sameTraceIDResourceSpan)
 		for _, resourceSpan := range sameTraceIDResourceSpan.All() {
-			serviceName := getServiceNameFromResource(resourceSpan.Resource())
-			if serviceName != "" {
-				t.services[serviceName] = struct{}{}
-			}
 			for _, scopeSpan := range resourceSpan.ScopeSpans().All() {
 				for _, span := range scopeSpan.Spans().All() {
-					if serviceName != "" {
-						operation := tracestore.Operation{
-							Name:     span.Name(),
-							SpanKind: fromOTELSpanKind(span.Kind()),
-						}
-						if _, ok := t.operations[serviceName]; !ok {
-							t.operations[serviceName] = make(map[tracestore.Operation]struct{})
-						}
-						t.operations[serviceName][operation] = struct{}{}
-					}
 					if startTime.IsZero() || span.StartTimestamp().AsTime().Before(startTime) {
 						startTime = span.StartTimestamp().AsTime()
 					}
@@ -128,8 +188,10 @@ func (t *Tenant) storeTraces(tracesById map[pcommon.TraceID]ptrace.ResourceSpans
 		sameTraceIDResourceSpan.MoveAndAppendTo(traces.ResourceSpans())
 		t.mostRecent = (t.mostRecent + 1) % len(t.traces)
 		// if there is already a trace in lastEvicted position, remove its ID from ids map
-		if !t.traces[t.mostRecent].id.IsEmpty() {
-			delete(t.ids, t.traces[t.mostRecent].id)
+		// and release the names it was the last trace to carry
+		if evicted := t.traces[t.mostRecent]; !evicted.id.IsEmpty() {
+			delete(t.ids, evicted.id)
+			t.unindexNames(evicted.trace.ResourceSpans())
 		}
 		// update the ring with the trace id
 		t.ids[traceId] = t.mostRecent
