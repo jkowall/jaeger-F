@@ -10,6 +10,7 @@ package mcptools
 import (
 	"embed"
 	"io/fs"
+	"slices"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"go.uber.org/zap"
@@ -21,6 +22,27 @@ import (
 )
 
 const findSpansToolName = "find_spans"
+
+// toolNames lists every tool registerTools registers. TestRegisterTools keeps
+// the two in step.
+var toolNames = []string{
+	"get_services",
+	"get_span_names",
+	"find_traces",
+	"get_span_details",
+	findSpansToolName,
+	"get_trace_errors",
+	"get_trace_topology",
+	"get_critical_path",
+	"get_service_dependencies",
+	"read_skill",
+}
+
+// ToolNames returns the names of the Jaeger telemetry tools, so the AI gateway
+// can tell a call to one of them from a call to a tool of the agent's own.
+func ToolNames() []string {
+	return slices.Clone(toolNames)
+}
 
 //go:embed INSTRUCTIONS.md
 var serverInstructions string

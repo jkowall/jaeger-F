@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -17,6 +19,8 @@ import (
 	aguisse "github.com/ag-ui-protocol/ag-ui/sdks/community/go/pkg/encoding/sse"
 	"github.com/coder/acp-go-sdk"
 	"go.uber.org/zap"
+
+	"github.com/jaegertracing/jaeger/cmd/jaeger/internal/extension/jaegerquery/internal/mcptools"
 )
 
 // aguiRunIDSeq is the process-wide monotonic counter that newIDStem
@@ -198,52 +202,132 @@ var _ acp.Client = (*acpClient)(nil)
 // aguiRun and declines the file and terminal operations the gateway does not
 // offer.
 type acpClient struct {
-	run *aguiRun
+	run    *aguiRun
+	logger *zap.Logger
 }
 
-func newACPClient(run *aguiRun) *acpClient {
-	return &acpClient{run: run}
+func newACPClient(run *aguiRun, logger *zap.Logger) *acpClient {
+	return &acpClient{run: run, logger: logger}
 }
 
-// RequestPermission auto-accepts tool calls by selecting the first
-// allow-flavoured option the agent offers. The gateway curates which tools
-// an agent can invoke through two pre-approved channels:
-//   - MCP tools the operator wires up at deploy time (read-only telemetry
-//     queries against Jaeger).
-//   - UI tools the frontend declares for the chat turn (browser-
-//     side AG-UI tools the user is implicitly authorising by sending the
-//     prompt).
+// RequestPermission approves, once, a tool call to the tools the gateway
+// serves over its MCP endpoint: the Jaeger telemetry tools and the turn's UI
+// tools. Every other call is cancelled and logged. The chat caller writes the
+// prompt that drives the agent, and anyone who can send spans writes text the
+// agent reads back, so an approval for a tool of the agent's own (a shell,
+// file edits, fetches, subagents) would run whatever that text asks for on
+// the agent's host. AG-UI has no event to put a per-call question to the
+// browser, so nobody else can approve such a call either.
 //
-// Filesystem and terminal capabilities are disabled in Initialize, so a
-// well-behaved agent will not have other tools to ask about; if one does
-// ask, we still accept because the tool itself was already curated upstream.
-// AG-UI has no permission-request event shape to bubble a per-call prompt
-// up to the browser, so deferring would be useless.
+// Agents like the Claude Agent SDK route every tool call, MCP calls included,
+// through session/request_permission and abort a cancelled call as "Tool use
+// aborted", which is why the gateway's own tools are approved rather than
+// cancelled with the rest.
 //
-// The previous "always cancel" policy was incompatible with agents like the
-// Claude Agent SDK, which routes every tool call through canUseTool / a
-// session/request_permission RPC; the cancelled outcome aborted every call
-// as "Tool use aborted". The Gemini sidecar never hit this because Gemini's
-// tool path does not issue ACP permission requests.
-//
-// If the agent presents no allow-kind option (e.g. only reject choices),
-// we fall through to cancelled so a misconfigured agent cannot be coerced
-// into a forbidden action.
-func (*acpClient) RequestPermission(_ context.Context, req acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
-	for _, opt := range req.Options {
-		if opt.Kind == acp.PermissionOptionKindAllowOnce || opt.Kind == acp.PermissionOptionKindAllowAlways {
-			return acp.RequestPermissionResponse{
-				Outcome: acp.RequestPermissionOutcome{
-					Selected: &acp.RequestPermissionOutcomeSelected{OptionId: opt.OptionId},
-				},
-			}, nil
+// Only allow_once is selected. An allow_always approval would let later calls
+// skip this check, and an agent that offers no allow_once gets a cancel.
+func (c *acpClient) RequestPermission(_ context.Context, req acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
+	reason := refuseToolCall(req.ToolCall)
+	if reason == "" {
+		for _, opt := range req.Options {
+			if opt.Kind == acp.PermissionOptionKindAllowOnce {
+				return acp.RequestPermissionResponse{
+					Outcome: acp.RequestPermissionOutcome{
+						Selected: &acp.RequestPermissionOutcomeSelected{OptionId: opt.OptionId},
+					},
+				}, nil
+			}
 		}
+		reason = "agent offered no allow_once option"
 	}
+	c.logger.Warn("Refused agent tool permission request",
+		zap.String("tool_call_id", string(req.ToolCall.ToolCallId)),
+		zap.String("title", valueOrZero(req.ToolCall.Title)),
+		zap.String("kind", string(valueOrZero(req.ToolCall.Kind))),
+		zap.String("reason", reason),
+	)
 	return acp.RequestPermissionResponse{
 		Outcome: acp.RequestPermissionOutcome{
 			Cancelled: &acp.RequestPermissionOutcomeCancelled{},
 		},
 	}, nil
+}
+
+func valueOrZero[T any](v *T) T {
+	if v == nil {
+		var zero T
+		return zero
+	}
+	return *v
+}
+
+// gatewayToolNames are the telemetry tools the gateway's MCP endpoint serves.
+var gatewayToolNames = mcptools.ToolNames()
+
+// mcpToolNamePattern is the character set and length MCP allows in a tool name.
+var mcpToolNamePattern = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,128}$`)
+
+// gatewayToolKinds are the ACP tool kinds a call to a gateway tool may carry.
+// The gateway's tools only read telemetry or hand a call to the browser, so a
+// call of any other kind (execute, edit, delete, move, fetch, think, ...) is a
+// tool of the agent's own, whatever its title says.
+var gatewayToolKinds = []acp.ToolKind{acp.ToolKindOther, acp.ToolKindRead, acp.ToolKindSearch}
+
+// commandInputKeys are input fields that carry a command for the agent's host
+// to run or a task for a subagent to carry out. No gateway tool takes one.
+// Agents title a shell call with its command and a subagent call with its
+// description, and some omit the kind, so the title alone does not tell such a
+// call from a gateway tool.
+var commandInputKeys = []string{"command", "cmd", "argv", "script", "shell", "executable", "prompt"}
+
+// refuseToolCall returns why a permission request is not for a gateway tool,
+// or "" when it is. The agent puts the name of the tool it was offered in the
+// title, optionally namespaced by the MCP server name it was given.
+func refuseToolCall(tc acp.ToolCallUpdate) string {
+	if tc.Title == nil {
+		return "tool call has no title"
+	}
+	if !isGatewayToolName(*tc.Title) {
+		return "not a tool served by the gateway"
+	}
+	if tc.Kind != nil && !slices.Contains(gatewayToolKinds, *tc.Kind) {
+		return "tool kind is not read-only"
+	}
+	if tc.RawInput == nil {
+		return ""
+	}
+	input, ok := tc.RawInput.(map[string]any)
+	if !ok {
+		return "tool input is not an object"
+	}
+	for key := range input {
+		if slices.Contains(commandInputKeys, strings.ToLower(key)) {
+			return "tool input carries a command or task"
+		}
+	}
+	return ""
+}
+
+// isGatewayToolName reports whether title names a telemetry tool or a UI tool,
+// bare or under one of the forms agents use to namespace an MCP server's tools.
+func isGatewayToolName(title string) bool {
+	name := title
+	for _, prefix := range []string{
+		"mcp__" + mcpServerName + "__",
+		mcpServerName + "__",
+		mcpServerName + "/",
+		mcpServerName + ": ",
+		mcpServerName + ".",
+	} {
+		if rest, ok := strings.CutPrefix(title, prefix); ok {
+			name = rest
+			break
+		}
+	}
+	if uiName, ok := strings.CutPrefix(name, UIToolPrefix); ok {
+		return mcpToolNamePattern.MatchString(uiName)
+	}
+	return slices.Contains(gatewayToolNames, name)
 }
 
 func (c *acpClient) SessionUpdate(_ context.Context, n acp.SessionNotification) error {
