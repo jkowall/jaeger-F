@@ -127,8 +127,9 @@ func TestRawClientHonorsServerPathPrefix(t *testing.T) {
 }
 
 // TestNewClientAppliesTLSConfig verifies that NewClient threads the tls.Config
-// into the transport: an untrusted server cert fails, and InsecureSkipVerify
-// makes it succeed.
+// into the transport: an untrusted server cert fails, including when TLS is
+// disabled (Insecure) but the URL is https, and only InsecureSkipVerify makes it
+// succeed.
 func TestNewClientAppliesTLSConfig(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -143,10 +144,19 @@ func TestNewClientAppliesTLSConfig(t *testing.T) {
 	_, err = strict.request(t.Context(), elasticRequest{method: http.MethodGet, endpoint: ""})
 	require.Error(t, err, "an untrusted self-signed cert must fail TLS verification")
 
-	insecure, err := NewClient(t.Context(), &config.Configuration{
+	tlsDisabled, err := NewClient(t.Context(), &config.Configuration{
 		Servers: []string{server.URL},
 		Version: uint(es.ElasticV7),
 		TLS:     configtls.ClientConfig{Insecure: true},
+	}, zap.NewNop(), nil)
+	require.NoError(t, err)
+	_, err = tlsDisabled.request(t.Context(), elasticRequest{method: http.MethodGet, endpoint: ""})
+	require.Error(t, err, "TLS disabled must not skip verification of an https server")
+
+	insecure, err := NewClient(t.Context(), &config.Configuration{
+		Servers: []string{server.URL},
+		Version: uint(es.ElasticV7),
+		TLS:     configtls.ClientConfig{InsecureSkipVerify: true},
 	}, zap.NewNop(), nil)
 	require.NoError(t, err)
 	_, err = insecure.request(t.Context(), elasticRequest{method: http.MethodGet, endpoint: ""})

@@ -6,7 +6,6 @@ package esclient
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"fmt"
 	"io"
 	"net/http"
@@ -82,22 +81,17 @@ func GetHTTPRoundTripper(ctx context.Context, c *config.Configuration, logger *z
 		Proxy: http.ProxyFromEnvironment,
 	}
 
-	// Configure TLS. Note: configtls.ClientConfig.Insecure means "TLS disabled"
+	// Configure TLS. configtls.ClientConfig.Insecure means "TLS disabled"
 	// (mapped from !--es.tls.enabled), NOT "skip certificate verification" — that
-	// is a separate field, InsecureSkipVerify (--es.tls.skip-host-verify). Client
-	// certificates, CA, and skip-host-verify all require TLS to be enabled, so
-	// they flow through LoadTLSConfig below, which preserves them. The Insecure
-	// branch only applies when TLS is turned off entirely, where no certs exist.
-	if c.TLS.Insecure {
-		// #nosec G402
-		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
-	} else {
-		tlsConfig, err := c.TLS.LoadTLSConfig(ctx)
-		if err != nil {
-			return nil, err
-		}
-		transport.TLSClientConfig = tlsConfig
+	// is a separate field, InsecureSkipVerify (--es.tls.skip-host-verify). With
+	// Insecure set and no CA, LoadTLSConfig returns a nil config, so an https
+	// server URL is still verified against the system trust store; certificate
+	// checks are skipped only when InsecureSkipVerify is set explicitly.
+	tlsConfig, err := c.TLS.LoadTLSConfig(ctx)
+	if err != nil {
+		return nil, err
 	}
+	transport.TLSClientConfig = tlsConfig
 
 	// Initialize authentication methods.
 	var authMethods []auth.Method
