@@ -72,8 +72,19 @@ func addRemoteReadClusters(fn TimeRangeIndexFn, remoteReadClusters []string) Tim
 	}
 }
 
-// timeRangeIndices returns the array of indices that we need to query, based on query params
+// timeRangeIndices returns the array of indices that we need to query, based on query params.
+// It lists at most DefaultMaxReadWindow of indices, counted back from endTime.
 func timeRangeIndices(indexName, indexDateLayout string, startTime time.Time, endTime time.Time, reduceDuration time.Duration) []string {
+	return timeRangeIndicesWithin(indexName, indexDateLayout, startTime, endTime, reduceDuration, DefaultMaxReadWindow)
+}
+
+// timeRangeIndicesWithin is timeRangeIndices for a range of at most maxWindow: a wider range
+// is narrowed to the maxWindow that ends at endTime before it is walked, so the walk takes
+// at most maxWindow/|reduceDuration| steps whatever range the caller passes.
+func timeRangeIndicesWithin(indexName, indexDateLayout string, startTime time.Time, endTime time.Time, reduceDuration time.Duration, maxWindow time.Duration) []string {
+	if endTime.Sub(startTime) > maxWindow {
+		startTime = endTime.Add(-maxWindow)
+	}
 	var result []string
 	firstIndex := IndexWithDate(indexName, indexDateLayout, startTime)
 	currentIndex := IndexWithDate(indexName, indexDateLayout, endTime)

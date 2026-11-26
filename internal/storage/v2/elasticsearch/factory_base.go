@@ -281,6 +281,7 @@ func (f *FactoryBase) buildSamplingRotation() indices.Rotation {
 		f.config.ResolvedSamplingRotation(),
 		nil,
 		f.logger,
+		indices.WithMaxReadWindow(max(f.config.AdaptiveSamplingLookback, indices.DefaultMaxReadWindow)),
 	)
 }
 
@@ -291,17 +292,20 @@ func (f *FactoryBase) buildDependencyRotation() indices.Rotation {
 		f.config.ResolvedDependencyRotation(),
 		f.config.RemoteReadClusters,
 		f.logger,
+		indices.WithMaxReadWindow(esdepstorev2.MaxLookback),
 	)
 }
 
 func (f *FactoryBase) buildRotations() (spanRotation, serviceRotation indices.Rotation) {
 	prefix := f.config.Indices.IndexPrefix
+	maxReadWindow := indices.WithMaxReadWindow(f.config.SpanReadWindow())
 	spanRotation = indices.BuildRotation(
 		prefix,
 		config.SpanIndexName,
 		f.config.ResolvedSpanRotation(),
 		f.config.RemoteReadClusters,
 		f.logger,
+		maxReadWindow,
 	)
 	serviceRotation = indices.BuildRotation(
 		prefix,
@@ -309,6 +313,7 @@ func (f *FactoryBase) buildRotations() (spanRotation, serviceRotation indices.Ro
 		f.config.ResolvedServiceRotation(),
 		f.config.RemoteReadClusters,
 		f.logger,
+		maxReadWindow,
 	)
 	return spanRotation, serviceRotation
 }

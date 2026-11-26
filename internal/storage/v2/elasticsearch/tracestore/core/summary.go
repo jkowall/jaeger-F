@@ -65,10 +65,10 @@ func (s *SpanReader) FindTraceSummaries(
 	const aggName = "trace_summaries"
 	aggregation := s.buildTraceSummariesAggregation(uint64(len(traceIDs)))
 	boolQuery := s.buildTraceSummariesByIDsQuery(traceIDs, traceQuery.StartTimeMin, traceQuery.StartTimeMax)
-	jaegerIndices := s.spanRotation.ReadTargets(
-		traceQuery.StartTimeMin.Add(-s.maxTraceDuration),
-		traceQuery.StartTimeMax.Add(s.maxTraceDuration),
-	)
+	jaegerIndices, err := s.paddedReadTargets(traceQuery.StartTimeMin, traceQuery.StartTimeMax)
+	if err != nil {
+		return nil, err
+	}
 
 	searchResult, err := s.searcher.Search(ctx, jaegerIndices, esclient.SearchRequest{
 		Size:  0,

@@ -301,6 +301,9 @@ type Configuration struct {
 	// For alias-based rotation (manual_rollover/auto_rollover), this should be set
 	// to match the ILM/ISM data retention policy so that GetTraces can find traces
 	// up to that age.
+	// For periodic rotation it also bounds the time range of a trace or span search,
+	// since each rollover step of that range becomes an index name; a wider search is
+	// refused as an invalid query.
 	MaxSpanAge time.Duration `mapstructure:"max_span_age"`
 	// MaxTraceDuration is the maximum expected duration of a single trace
 	// (time between the earliest and latest span in the trace).
@@ -586,6 +589,12 @@ func (c *Configuration) EffectivePoisonHandling() PoisonHandling {
 		return c.PoisonPillHandling
 	}
 	return PoisonFail
+}
+
+// SpanReadWindow is the widest time range a span read turns into index names: a read by
+// trace ID looks back MaxSpanAge and widens that range by MaxTraceDuration on both sides.
+func (c *Configuration) SpanReadWindow() time.Duration {
+	return c.MaxSpanAge + 2*c.MaxTraceDuration
 }
 
 // validatePoisonHandling rejects an unrecognized poison_pill_handling. An empty

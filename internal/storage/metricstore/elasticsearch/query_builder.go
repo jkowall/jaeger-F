@@ -109,10 +109,17 @@ func (*QueryBuilder) buildTimeSeriesAggQuery(params metricstore.BaseQueryParamet
 
 // Execute runs the Elasticsearch search with the provided bool and aggregation queries.
 func (q *QueryBuilder) Execute(ctx context.Context, boolQuery *esquery.BoolQuery, aggQuery esquery.Aggregation, timeRange TimeRange) (*esclient.SearchResponse, error) {
-	idxList := q.spanRotation.ReadTargets(
+	// The range, which starts a rate interval before the lookback for call and error rates,
+	// may be at most as wide as a span read, which the span rotation is built to list.
+	idxList, err := indices.ReadTargetsWithin(
+		q.spanRotation,
 		time.UnixMilli(timeRange.extendedStartTimeMillis).UTC(),
 		time.UnixMilli(timeRange.endTimeMillis).UTC(),
+		q.cfg.SpanReadWindow(),
 	)
+	if err != nil {
+		return nil, err
+	}
 
 	// Size 0 returns only aggregation results, excluding individual search hits.
 	return q.searcher.Search(ctx, idxList, esclient.SearchRequest{
