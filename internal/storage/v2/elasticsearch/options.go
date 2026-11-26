@@ -10,6 +10,7 @@ import (
 	"go.opentelemetry.io/collector/config/configoptional"
 
 	"github.com/jaegertracing/jaeger/internal/storage/elasticsearch/config"
+	esspanstore "github.com/jaegertracing/jaeger/internal/storage/v2/elasticsearch/tracestore/core"
 )
 
 var defaultIndexOptions = config.IndexOptions{
@@ -51,7 +52,7 @@ func DefaultConfig() config.Configuration {
 		Sniffing: config.Sniffing{
 			Enabled: false,
 		},
-		MaxSpanAge:               72 * time.Hour,
+		MaxSpanAge:               esspanstore.DefaultMaxSpanAge,
 		MaxTraceDuration:         24 * time.Hour,
 		AdaptiveSamplingLookback: 72 * time.Hour,
 		BulkProcessing: config.BulkProcessing{
