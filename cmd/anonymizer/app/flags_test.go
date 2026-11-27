@@ -7,7 +7,9 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/jaegertracing/jaeger/internal/testutils"
 )
@@ -56,6 +58,40 @@ func TestOptionsWithFlags(t *testing.T) {
 	assert.Equal(t, 100, o.MaxSpansCount)
 	assert.Equal(t, int64(1), o.StartTime)
 	assert.Equal(t, int64(2), o.EndTime)
+}
+
+func newTLSOptions(t *testing.T, args ...string) (*Options, error) {
+	o := &Options{}
+	c := cobra.Command{}
+	o.AddFlags(&c)
+	require.NoError(t, c.ParseFlags(args))
+	v := viper.New()
+	require.NoError(t, v.BindPFlags(c.Flags()))
+	err := o.InitFromViper(v)
+	return o, err
+}
+
+func TestOptionsQueryTLSDefault(t *testing.T) {
+	o, err := newTLSOptions(t)
+	require.NoError(t, err)
+	assert.True(t, o.QueryTLS.Insecure)
+}
+
+func TestOptionsQueryTLSEnabled(t *testing.T) {
+	o, err := newTLSOptions(t,
+		"--query.tls.enabled",
+		"--query.tls.ca=/path/to/ca.pem",
+		"--query.tls.server-name=query.example.com",
+	)
+	require.NoError(t, err)
+	assert.False(t, o.QueryTLS.Insecure)
+	assert.Equal(t, "/path/to/ca.pem", o.QueryTLS.CAFile)
+	assert.Equal(t, "query.example.com", o.QueryTLS.ServerName)
+}
+
+func TestOptionsQueryTLSOptionsWithoutEnabled(t *testing.T) {
+	_, err := newTLSOptions(t, "--query.tls.ca=/path/to/ca.pem")
+	require.ErrorContains(t, err, "query.tls.enabled")
 }
 
 func TestMain(m *testing.M) {

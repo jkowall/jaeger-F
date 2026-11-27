@@ -7,14 +7,17 @@ import (
 	"context"
 	"errors"
 	"net"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/collector/config/configtls"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/status"
 
 	"github.com/jaegertracing/jaeger-idl/model/v1"
@@ -225,6 +228,116 @@ func TestQueryTrace(t *testing.T) {
 		spans, err := q.QueryTrace(mockTraceID.String(), time.Time{}, time.Time{})
 		assert.Nil(t, spans)
 		assert.ErrorContains(t, err, "failed during recv")
+	})
+}
+
+const tlsTestdata = "../../../../internal/config/tlscfg/testdata/"
+
+func TestNewWithTLSInvalidConfig(t *testing.T) {
+	cfg := configtls.ClientConfig{}
+	cfg.CAFile = tlsTestdata + "does-not-exist.pem"
+	q, err := NewWithTLS("localhost:16686", cfg)
+	require.ErrorContains(t, err, "failed to load TLS config")
+	assert.Nil(t, q)
+}
+
+func TestNewWithTLSQueryTrace(t *testing.T) {
+	creds, err := credentials.NewServerTLSFromFile(tlsTestdata+"example-server-cert.pem", tlsTestdata+"example-server-key.pem")
+	require.NoError(t, err)
+	server := grpc.NewServer(grpc.Creds(creds))
+	api_v2.RegisterQueryServiceServer(server, &testGRPCHandler{returnTrace: mockTraceGRPC})
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	var exited sync.WaitGroup
+	exited.Go(func() {
+		assert.NoError(t, server.Serve(lis))
+	})
+	t.Cleanup(func() {
+		server.Stop()
+		exited.Wait()
+	})
+
+	cfg := configtls.ClientConfig{ServerName: "example.com"}
+	cfg.CAFile = tlsTestdata + "example-CA-cert.pem"
+	q, err := NewWithTLS(lis.Addr().String(), cfg)
+	require.NoError(t, err)
+	defer q.Close()
+
+	spans, err := q.QueryTrace(mockTraceID.String(), time.Time{}, time.Time{})
+	require.NoError(t, err)
+	assert.Len(t, spans, len(mockTraceGRPC.Spans))
+}
+
+type fakeConn struct {
+	net.Conn
+	remote net.Addr
+}
+
+func (c fakeConn) RemoteAddr() net.Addr { return c.remote }
+
+func TestRequireLoopbackPeer(t *testing.T) {
+	for _, ip := range []string{"127.0.0.1", "::1", "::ffff:127.0.0.1"} {
+		conn := fakeConn{remote: &net.TCPAddr{IP: net.ParseIP(ip), Port: 16686}}
+		require.NoError(t, requireLoopbackPeer(conn), ip)
+	}
+	for _, ip := range []string{"10.0.0.1", "192.168.1.10", "::ffff:10.0.0.1", "2001:db8::1", "0.0.0.0"} {
+		conn := fakeConn{remote: &net.TCPAddr{IP: net.ParseIP(ip), Port: 16686}}
+		require.ErrorIs(t, requireLoopbackPeer(conn), ErrPlaintextNonLoopback, ip)
+	}
+	conn := fakeConn{remote: &net.UnixAddr{Name: "/tmp/query.sock", Net: "unix"}}
+	require.ErrorIs(t, requireLoopbackPeer(conn), ErrPlaintextNonLoopback)
+}
+
+func nonLoopbackIPv4(t *testing.T) net.IP {
+	addrs, err := net.InterfaceAddrs()
+	require.NoError(t, err)
+	for _, addr := range addrs {
+		if ipnet, ok := addr.(*net.IPNet); ok {
+			if ip := ipnet.IP.To4(); ip != nil && !ip.IsLoopback() && !ip.IsLinkLocalUnicast() {
+				return ip
+			}
+		}
+	}
+	t.Skip("no non-loopback IPv4 address available")
+	return nil
+}
+
+func TestDialLoopbackOnly(t *testing.T) {
+	lis, err := net.Listen("tcp", ":0")
+	require.NoError(t, err)
+	defer lis.Close()
+	go func() {
+		for {
+			conn, err := lis.Accept()
+			if err != nil {
+				return
+			}
+			conn.Close()
+		}
+	}()
+	port := lis.Addr().(*net.TCPAddr).Port
+
+	t.Run("loopback", func(t *testing.T) {
+		conn, err := dialLoopbackOnly(t.Context(), net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+		require.NoError(t, err)
+		require.NoError(t, conn.Close())
+	})
+
+	t.Run("non-loopback", func(t *testing.T) {
+		ip := nonLoopbackIPv4(t)
+		conn, err := dialLoopbackOnly(t.Context(), net.JoinHostPort(ip.String(), strconv.Itoa(port)))
+		require.ErrorIs(t, err, ErrPlaintextNonLoopback)
+		assert.Nil(t, conn)
+	})
+
+	t.Run("dial failure", func(t *testing.T) {
+		closed, err := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(t, err)
+		addr := closed.Addr().String()
+		require.NoError(t, closed.Close())
+		conn, err := dialLoopbackOnly(t.Context(), addr)
+		require.Error(t, err)
+		assert.Nil(t, conn)
 	})
 }
 
