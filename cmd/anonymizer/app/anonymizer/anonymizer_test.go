@@ -4,6 +4,7 @@
 package anonymizer
 
 import (
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -13,6 +14,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/jaegertracing/jaeger-idl/model/v1"
 )
@@ -90,6 +93,59 @@ func TestNew(t *testing.T) {
 	anonymizer := New(file.Name(), Options{}, nopLogger)
 	defer anonymizer.Stop()
 	assert.NotNil(t, anonymizer)
+}
+
+func TestNew_InvalidMappingDoesNotLogNames(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+	}{
+		{
+			name:    "type mismatch",
+			content: `{"Services":{"ledgerservice":1}}`,
+		},
+		{
+			name:    "syntax error",
+			content: `{"Services":{"ledgerservice":"x",}}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mappingFile := filepath.Join(t.TempDir(), "mapping.json")
+			require.NoError(t, os.WriteFile(mappingFile, []byte(tt.content), PermUserRW))
+
+			core, logs := observer.New(zap.InfoLevel)
+			logger := zap.New(core, zap.WithFatalHook(zapcore.WriteThenPanic))
+			require.Panics(t, func() {
+				New(mappingFile, Options{}, logger)
+			})
+
+			entries := logs.All()
+			require.Len(t, entries, 1)
+			assert.Equal(t, "Cannot unmarshal previous mapping", entries[0].Message)
+			for _, v := range entries[0].ContextMap() {
+				assert.NotContains(t, fmt.Sprint(v), "ledgerservice")
+			}
+		})
+	}
+}
+
+func TestAnonymizer_SaveMappingLogsOnlyPath(t *testing.T) {
+	mappingFile := filepath.Join(t.TempDir(), "mapping.json")
+	core, logs := observer.New(zap.InfoLevel)
+	anonymizer := Anonymizer{
+		logger: zap.New(core),
+		mapping: mapping{
+			Services:   map[string]string{"ledgerservice": "hashed_service"},
+			Operations: map[string]string{"[ledgerservice]:post": "hashed_operation"},
+		},
+		mappingFile: mappingFile,
+	}
+	anonymizer.SaveMapping()
+
+	entries := logs.All()
+	require.Len(t, entries, 1)
+	assert.Equal(t, "Saved mapping file "+mappingFile, entries[0].Message)
 }
 
 func TestAnonymizer_SaveMapping(t *testing.T) {
