@@ -18,6 +18,16 @@ func removeOverflowingChildren(spanMap map[pcommon.SpanID]CPSpan) map[pcommon.Sp
 		spanIDs = append(spanIDs, spanID)
 	}
 
+	// Dropped children are removed from their parent's ChildSpanIDs once, after
+	// the loop, so that dropping many children of one parent stays linear.
+	droppedChildren := make(map[pcommon.SpanID]map[pcommon.SpanID]struct{})
+	dropChild := func(parentID, childID pcommon.SpanID) {
+		if droppedChildren[parentID] == nil {
+			droppedChildren[parentID] = make(map[pcommon.SpanID]struct{})
+		}
+		droppedChildren[parentID][childID] = struct{}{}
+	}
+
 	for _, spanID := range spanIDs {
 		span, ok := spanMap[spanID]
 		if !ok || span.ParentSpanID.IsEmpty() {
@@ -41,16 +51,7 @@ func removeOverflowingChildren(spanMap map[pcommon.SpanID]CPSpan) map[pcommon.Sp
 				//      |----parent----|
 				//                        |----child--|
 				delete(spanMap, span.SpanID)
-
-				// Remove the childSpanId from its parent span
-				filteredChildren := make([]pcommon.SpanID, 0, len(parentSpan.ChildSpanIDs))
-				for _, childID := range parentSpan.ChildSpanIDs {
-					if childID != span.SpanID {
-						filteredChildren = append(filteredChildren, childID)
-					}
-				}
-				parentSpan.ChildSpanIDs = filteredChildren
-				spanMap[parentSpan.SpanID] = parentSpan
+				dropChild(parentSpan.SpanID, span.SpanID)
 				continue
 			}
 			if childEndTime > parentEndTime {
@@ -73,16 +74,7 @@ func removeOverflowingChildren(spanMap map[pcommon.SpanID]CPSpan) map[pcommon.Sp
 			//                      |----parent----|
 			//       |----child--|
 			delete(spanMap, span.SpanID)
-
-			// Remove the childSpanId from its parent span
-			filteredChildren := make([]pcommon.SpanID, 0, len(parentSpan.ChildSpanIDs))
-			for _, childID := range parentSpan.ChildSpanIDs {
-				if childID != span.SpanID {
-					filteredChildren = append(filteredChildren, childID)
-				}
-			}
-			parentSpan.ChildSpanIDs = filteredChildren
-			spanMap[parentSpan.SpanID] = parentSpan
+			dropChild(parentSpan.SpanID, span.SpanID)
 		case childEndTime <= parentEndTime:
 			// child start before parent, truncate is needed
 			//      |----parent----|
@@ -98,6 +90,21 @@ func removeOverflowingChildren(spanMap map[pcommon.SpanID]CPSpan) map[pcommon.Sp
 			span.Duration = parentEndTime - parentSpan.StartTime
 			spanMap[span.SpanID] = span
 		}
+	}
+
+	for parentID, parentSpan := range spanMap {
+		dropped, ok := droppedChildren[parentID]
+		if !ok {
+			continue
+		}
+		filteredChildren := make([]pcommon.SpanID, 0, len(parentSpan.ChildSpanIDs))
+		for _, childID := range parentSpan.ChildSpanIDs {
+			if _, isDropped := dropped[childID]; !isDropped {
+				filteredChildren = append(filteredChildren, childID)
+			}
+		}
+		parentSpan.ChildSpanIDs = filteredChildren
+		spanMap[parentID] = parentSpan
 	}
 
 	return spanMap

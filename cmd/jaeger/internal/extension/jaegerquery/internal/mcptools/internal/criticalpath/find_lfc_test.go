@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 )
 
@@ -224,7 +225,7 @@ func TestFindLastFinishingChildSpan(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := findLastFinishingChildSpan(tt.spanMap, tt.currentSpan, tt.returningChildStartTime)
+			result := newChildCursor(tt.spanMap, tt.currentSpan).lastFinishingChild(tt.returningChildStartTime)
 
 			if tt.expectedSpanID == nil {
 				assert.Nil(t, result, "expected nil result")
@@ -236,4 +237,32 @@ func TestFindLastFinishingChildSpan(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestChildCursor_RepeatedReturns(t *testing.T) {
+	spanMap := map[pcommon.SpanID]CPSpan{
+		spanID(2): {SpanID: spanID(2), StartTime: 0, Duration: 10},  // 0-10
+		spanID(3): {SpanID: spanID(3), StartTime: 10, Duration: 10}, // 10-20
+		spanID(4): {SpanID: spanID(4), StartTime: 5, Duration: 15},  // 5-20
+		spanID(5): {SpanID: spanID(5), StartTime: 10, Duration: 0},  // 10-10
+		spanID(6): {SpanID: spanID(6), StartTime: 0, Duration: 0},   // 0-0
+	}
+	cursor := newChildCursor(spanMap, CPSpan{
+		SpanID:       spanID(1),
+		ChildSpanIDs: []pcommon.SpanID{spanID(6), spanID(2), spanID(5), spanID(3), spanID(4)},
+	})
+
+	// Span 3 comes before span 4 in ChildSpanIDs and both end at 20.
+	first := cursor.lastFinishingChild(nil)
+	require.NotNil(t, first)
+	assert.Equal(t, spanID(3), first.SpanID)
+
+	// Returning at 10, span 4 ends too late and span 5 does not start before 10.
+	second := cursor.lastFinishingChild(new(uint64(10)))
+	require.NotNil(t, second)
+	assert.Equal(t, spanID(2), second.SpanID)
+
+	// Span 6 ends at 0 and is never picked.
+	assert.Nil(t, cursor.lastFinishingChild(new(uint64(0))))
+	assert.Nil(t, cursor.lastFinishingChild(nil))
 }
