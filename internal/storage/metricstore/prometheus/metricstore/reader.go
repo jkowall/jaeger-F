@@ -292,6 +292,13 @@ func (m MetricsReader) GetErrorRates(ctx context.Context, requestParams *metrics
 
 // executeQuery executes a query against a Prometheus-compliant metrics backend.
 func (m MetricsReader) executeQuery(ctx context.Context, p metricsQueryParams) (*metrics.MetricFamily, error) {
+	if p.EndTime == nil || p.Lookback == nil || p.Step == nil {
+		return nil, errors.New("invalid parameters: EndTime, Lookback and Step are required")
+	}
+	// The backend returns one sample per step across the range, and the client loads all of them.
+	if err := metricstore.CheckQueryPoints(*p.Step, *p.Lookback); err != nil {
+		return nil, err
+	}
 	if p.GroupByOperation {
 		p.metricName = strings.Replace(p.metricName, "service", "service_operation", 1)
 		p.metricDesc += " & operation"

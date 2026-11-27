@@ -16,11 +16,13 @@ import (
 func TestCalculateTimeRange(t *testing.T) {
 	endTime := time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)
 	lookback := time.Hour
+	step := time.Minute
 	startTime := endTime.Add(-lookback)
 
 	tr, err := calculateTimeRange(&metricstore.BaseQueryParameters{
 		EndTime:  &endTime,
 		Lookback: &lookback,
+		Step:     &step,
 	})
 	require.NoError(t, err)
 	assert.Equal(t, startTime.UnixMilli(), tr.startTimeMillis)
@@ -31,6 +33,7 @@ func TestCalculateTimeRange(t *testing.T) {
 func TestCalculateRateTimeRange(t *testing.T) {
 	endTime := time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)
 	lookback := time.Hour
+	step := time.Minute
 	startTime := endTime.Add(-lookback)
 
 	for _, ratePer := range []time.Duration{5 * time.Minute, 10 * time.Minute, 30 * time.Minute, time.Hour} {
@@ -38,6 +41,7 @@ func TestCalculateRateTimeRange(t *testing.T) {
 			tr, err := calculateRateTimeRange(&metricstore.BaseQueryParameters{
 				EndTime:  &endTime,
 				Lookback: &lookback,
+				Step:     &step,
 				RatePer:  &ratePer,
 			})
 			require.NoError(t, err)

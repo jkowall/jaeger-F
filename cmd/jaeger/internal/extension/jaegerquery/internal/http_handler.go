@@ -171,7 +171,7 @@ func (aH *APIHandler) latencies(w http.ResponseWriter, r *http.Request) {
 		aH.handleError(w, newParseError(err, quantileParam), http.StatusBadRequest)
 		return
 	}
-	aH.metrics(w, r, func(ctx context.Context, baseParams metricstore.BaseQueryParameters) (*metrics.MetricFamily, error) {
+	aH.metrics(w, r, false, func(ctx context.Context, baseParams metricstore.BaseQueryParameters) (*metrics.MetricFamily, error) {
 		return aH.metricsQueryService.GetLatencies(ctx, &metricstore.LatenciesQueryParameters{
 			BaseQueryParameters: baseParams,
 			Quantile:            q,
@@ -180,7 +180,7 @@ func (aH *APIHandler) latencies(w http.ResponseWriter, r *http.Request) {
 }
 
 func (aH *APIHandler) calls(w http.ResponseWriter, r *http.Request) {
-	aH.metrics(w, r, func(ctx context.Context, baseParams metricstore.BaseQueryParameters) (*metrics.MetricFamily, error) {
+	aH.metrics(w, r, true, func(ctx context.Context, baseParams metricstore.BaseQueryParameters) (*metrics.MetricFamily, error) {
 		return aH.metricsQueryService.GetCallRates(ctx, &metricstore.CallRateQueryParameters{
 			BaseQueryParameters: baseParams,
 		})
@@ -188,16 +188,25 @@ func (aH *APIHandler) calls(w http.ResponseWriter, r *http.Request) {
 }
 
 func (aH *APIHandler) errors(w http.ResponseWriter, r *http.Request) {
-	aH.metrics(w, r, func(ctx context.Context, baseParams metricstore.BaseQueryParameters) (*metrics.MetricFamily, error) {
+	aH.metrics(w, r, true, func(ctx context.Context, baseParams metricstore.BaseQueryParameters) (*metrics.MetricFamily, error) {
 		return aH.metricsQueryService.GetErrorRates(ctx, &metricstore.ErrorRateQueryParameters{
 			BaseQueryParameters: baseParams,
 		})
 	})
 }
 
-func (aH *APIHandler) metrics(w http.ResponseWriter, r *http.Request, getMetrics func(context.Context, metricstore.BaseQueryParameters) (*metrics.MetricFamily, error)) {
+// metrics serves a metrics query. windowIncludesRatePer is set for rate queries, whose
+// window also covers the ratePer interval before the lookback that the rate is computed over.
+func (aH *APIHandler) metrics(w http.ResponseWriter, r *http.Request, windowIncludesRatePer bool, getMetrics func(context.Context, metricstore.BaseQueryParameters) (*metrics.MetricFamily, error)) {
 	requestParams, err := aH.queryParser.parseMetricsQueryParams(r)
 	if aH.handleError(w, err, http.StatusBadRequest) {
+		return
+	}
+	window := []time.Duration{*requestParams.Lookback}
+	if windowIncludesRatePer {
+		window = append(window, *requestParams.RatePer)
+	}
+	if err := metricstore.CheckQueryPoints(*requestParams.Step, window...); aH.handleError(w, err, http.StatusBadRequest) {
 		return
 	}
 	if len(requestParams.Filters) > 0 {

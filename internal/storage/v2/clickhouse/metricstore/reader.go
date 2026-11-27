@@ -103,6 +103,11 @@ func (r *Reader) queryMetrics(
 	if len(params.Filters) > 0 {
 		return nil, fmt.Errorf("dimension filtering: %w", errors.ErrUnsupported)
 	}
+	// Rows are grouped per step across the window, so a series with data in every step returns a row per step.
+	start, end := queryWindow(params)
+	if err := metricstore.CheckQueryPoints(stepDuration(params), end.Sub(start)); err != nil {
+		return nil, err
+	}
 	name, desc := cfg.baseName, cfg.baseDesc
 	query := cfg.baseQuery
 	if params.GroupByOperation {
@@ -199,6 +204,14 @@ func stepSeconds(p metricstore.BaseQueryParameters) uint64 {
 		return uint64(s)
 	}
 	return defaultStepSeconds
+}
+
+// stepDuration is stepSeconds as a time.Duration: the step that rows are grouped by.
+func stepDuration(p metricstore.BaseQueryParameters) time.Duration {
+	if p.Step != nil && *p.Step > 0 {
+		return max(p.Step.Truncate(time.Second), time.Second)
+	}
+	return time.Duration(defaultStepSeconds) * time.Second
 }
 
 func convertSpanKinds(kinds []string) []string {
