@@ -228,6 +228,11 @@ func (p preparedFilter) compileRegexps(filter *expression.Call) error {
 		return nil
 	}
 	if filter.Op == expression.OpRegex {
+		// validateFilterShape checks only the calls it evaluates, so a regex nested as
+		// an operand of a comparison reaches here with its arity unchecked.
+		if len(filter.Args) != 2 {
+			return errArity(filter)
+		}
 		var pattern string
 		switch v := filter.Args[1].(type) {
 		case *expression.StringValue:

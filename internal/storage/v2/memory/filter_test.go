@@ -880,6 +880,17 @@ func TestPrepareFilter_Regex(t *testing.T) {
 	_, err = prepareFilter(p.And(nameRef.Exists(), nameRef.Matches("(")))
 	require.ErrorIs(t, err, tracestore.ErrFilterInvalid, "the same pattern nested under and")
 
+	// A regex used as a comparison operand is outside the shape check, which looks only at
+	// the calls it evaluates; preparing it must still refuse a wrong argument count.
+	nameField := fieldRef(expression.LevelSpan, expression.SpanFieldName)
+	for _, regex := range []*expression.Call{
+		call(expression.OpRegex),
+		call(expression.OpRegex, nameField),
+	} {
+		_, err = prepareFilter(call(expression.OpEq, regex, &expression.StringValue{Value: "x"}))
+		require.ErrorIs(t, err, tracestore.ErrFilterInvalid, "a regex operand with %d arguments", len(regex.Args))
+	}
+
 	prepared, err = prepareFilter(nil)
 	require.NoError(t, err)
 	assert.True(t, matchesFilter(prepared, pcommon.NewResource(), pcommon.NewInstrumentationScope(), ptrace.NewSpan(), "", ""),
