@@ -163,11 +163,18 @@ func (h *Handler) FindSpans(req *storage.FindSpansRequest, srv storage.TraceRead
 	return nil
 }
 
+// toSpanQueryParams translates a wire span query into the reader's shape. Like
+// toTraceQueryParams, it finalizes the filter, because the decoder does not validate it and a
+// reader is entitled to assume a finalized one; a filter that does not finalize is
+// InvalidArgument.
 func toSpanQueryParams(wire *storage.SpanQueryParameters) (tracestore.SpanQueryParams, error) {
 	if wire == nil {
 		return tracestore.SpanQueryParams{}, status.Error(codes.InvalidArgument, "missing query")
 	}
 	filter, err := expressionproto.CallFromProto(wire.Filter)
+	if err == nil && filter != nil {
+		filter, err = tracestore.FinalizeFilter(filter)
+	}
 	if err != nil {
 		return tracestore.SpanQueryParams{}, status.Error(codes.InvalidArgument, err.Error())
 	}

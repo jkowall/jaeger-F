@@ -1216,9 +1216,15 @@ func TestSpanClientCannotStartStream(t *testing.T) {
 	assert.ErrorContains(t, err, "failed to execute FindSpans")
 }
 
+// TestSpanQueryConversionDoesNotValidate pins that the sort order crosses the wire unvalidated,
+// since settling it is the query service's job. The filter is not exempt: the server finalizes it
+// (RFC 0005 §7), so this one is already in finalized form.
 func TestSpanQueryConversionDoesNotValidate(t *testing.T) {
 	query := tracestore.SpanQueryParams{
-		Filter:  &expression.Call{Op: "custom", Args: []expression.Expression{}},
+		Filter: &expression.Call{Op: expression.OpEq, Args: []expression.Expression{
+			&expression.FieldRef{Level: expression.LevelSpan, Name: expression.SpanFieldName},
+			&expression.StringValue{Value: "GET /"},
+		}},
 		OrderBy: []tracestore.SpanSortOrder{{Expression: &expression.AttributeRef{Level: expression.LevelSpan, Key: "priority"}, Direction: "custom"}},
 	}
 	wire, err := toProtoSpanQuery(query)
