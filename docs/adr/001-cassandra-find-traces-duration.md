@@ -1,7 +1,7 @@
 # Cassandra FindTraceIDs Duration Query Behavior
 
 * **Status**: Documented existing implementation
-* **Date**: 2026-01-03, extended 2026-11-13: the refusal of a duration bound combined with tags is marked unsupported
+* **Date**: 2026-01-03, extended 2026-11-13: the refusal of a duration bound combined with tags is marked unsupported; extended 2026-11-23: the bucket walk is bounded
 
 ## Context
 
@@ -120,6 +120,8 @@ When a `TraceQueryParameters` contains `DurationMin` or `DurationMax`:
 - Only `ServiceName` and `OperationName` parameters will be respected (used as partition key components)
 - A query that also has tag filters is refused with `ErrDurationAndTagQueryNotSupported`, which matches `errors.ErrUnsupported` so that the API answers `Unimplemented` / HTTP 501 ([ADR-013](./013-storage-capability-declaration.md))
 - The code will iterate over hourly time buckets within the query time range
+
+Each bucket is its own partition and therefore its own statement, and an empty bucket does not end the walk, so without a bound the time range alone decides how many statements one search sends. The walk therefore reads at most `maxDurationBuckets` (48) buckets, starting from the newest; a longer range is served from its most recent two days, which is the default trace TTL.
 
 This approach is documented in code comments and in this ADR to set proper expectations.
 
