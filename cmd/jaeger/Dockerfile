@@ -83,9 +83,6 @@ EXPOSE 9411
 # Web HTTP
 EXPOSE 16686
 
-# Delve
-EXPOSE 12345
-
 # Health Check gRPC
 EXPOSE 13132
 
@@ -97,5 +94,7 @@ COPY sampling-strategies.json /cmd/jaeger/sampling-strategies.json
 
 VOLUME ["/tmp"]
 # Launch Jaeger under Delve debugger in headless mode but without pausing on start (--continue).
-ENTRYPOINT ["/go/bin/dlv", "exec", "/cmd/jaeger/jaeger-linux", "--continue", "--headless", "--listen=:12345", "--api-version=2", "--accept-multiclient", "--log", "--"]
+# Delve does not authenticate clients, so it listens on loopback only. Attach from inside
+# the container as the image user, e.g. `kubectl exec -it <pod> -- /go/bin/dlv connect 127.0.0.1:12345`.
+ENTRYPOINT ["/go/bin/dlv", "exec", "/cmd/jaeger/jaeger-linux", "--continue", "--headless", "--listen=127.0.0.1:12345", "--api-version=2", "--accept-multiclient", "--log", "--"]
 USER ${USER_UID}:${USER_GID}
