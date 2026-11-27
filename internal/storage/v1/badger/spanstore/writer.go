@@ -24,12 +24,14 @@ import (
 */
 
 const (
-	spanKeyPrefix         byte = 0x80 // All span keys should have first bit set to 1
-	indexKeyRange         byte = 0x0F // Secondary indexes use last 4 bits
-	serviceNameIndexKey   byte = 0x81
-	operationNameIndexKey byte = 0x82
-	tagIndexKey           byte = 0x83
+	spanKeyPrefix       byte = 0x80 // All span keys should have first bit set to 1
+	indexKeyRange       byte = 0x0F // Secondary indexes use last 4 bits
+	serviceNameIndexKey byte = 0x81
+	// 0x82 and 0x83 must not be reused: databases written by older versions hold operation
+	// and tag index keys there whose fields were joined without boundaries.
 	durationIndexKey      byte = 0x84
+	operationNameIndexKey byte = 0x85
+	tagIndexKey           byte = 0x86
 	jsonEncoding          byte = 0x01 // Last 4 bits of the meta byte are for encoding type
 	protoEncoding         byte = 0x02 // Last 4 bits of the meta byte are for encoding type
 	defaultEncoding       byte = protoEncoding
@@ -71,7 +73,7 @@ func (w *SpanWriter) WriteSpan(_ context.Context, span *model.Span) error {
 		entriesToStore,
 		trace,
 		w.createBadgerEntry(createIndexKey(serviceNameIndexKey, []byte(span.Process.ServiceName), startTime, span.TraceID), nil, expireTime),
-		w.createBadgerEntry(createIndexKey(operationNameIndexKey, []byte(span.Process.ServiceName+span.OperationName), startTime, span.TraceID), nil, expireTime),
+		w.createBadgerEntry(createIndexKey(operationNameIndexKey, encodeIndexFields(span.Process.ServiceName, span.OperationName), startTime, span.TraceID), nil, expireTime),
 	)
 
 	// It doesn't matter if we overwrite Duration index keys, everything is read at Trace level in any case
@@ -81,17 +83,17 @@ func (w *SpanWriter) WriteSpan(_ context.Context, span *model.Span) error {
 
 	for _, kv := range span.Tags {
 		// Convert everything to string since queries are done that way also
-		// KEY: it<serviceName><tagsKey><traceId> VALUE: <tagsValue>
-		entriesToStore = append(entriesToStore, w.createBadgerEntry(createIndexKey(tagIndexKey, []byte(span.Process.ServiceName+kv.Key+kv.AsString()), startTime, span.TraceID), nil, expireTime))
+		// KEY: it<serviceName><tagsKey><tagsValue><startTime><traceId>, each text field length-prefixed
+		entriesToStore = append(entriesToStore, w.createBadgerEntry(createIndexKey(tagIndexKey, encodeIndexFields(span.Process.ServiceName, kv.Key, kv.AsString()), startTime, span.TraceID), nil, expireTime))
 	}
 
 	for _, kv := range span.Process.Tags {
-		entriesToStore = append(entriesToStore, w.createBadgerEntry(createIndexKey(tagIndexKey, []byte(span.Process.ServiceName+kv.Key+kv.AsString()), startTime, span.TraceID), nil, expireTime))
+		entriesToStore = append(entriesToStore, w.createBadgerEntry(createIndexKey(tagIndexKey, encodeIndexFields(span.Process.ServiceName, kv.Key, kv.AsString()), startTime, span.TraceID), nil, expireTime))
 	}
 
 	for _, log := range span.Logs {
 		for _, kv := range log.Fields {
-			entriesToStore = append(entriesToStore, w.createBadgerEntry(createIndexKey(tagIndexKey, []byte(span.Process.ServiceName+kv.Key+kv.AsString()), startTime, span.TraceID), nil, expireTime))
+			entriesToStore = append(entriesToStore, w.createBadgerEntry(createIndexKey(tagIndexKey, encodeIndexFields(span.Process.ServiceName, kv.Key, kv.AsString()), startTime, span.TraceID), nil, expireTime))
 		}
 	}
 
@@ -115,6 +117,31 @@ func (w *SpanWriter) WriteSpan(_ context.Context, span *model.Span) error {
 	w.cache.Update(span.Process.ServiceName, span.OperationName, expireTime)
 
 	return err
+}
+
+// encodeIndexFields prefixes each field with its uvarint length, so that distinct field
+// lists never encode to the same bytes and an encoded list is never a prefix of another
+// list with a different first field.
+func encodeIndexFields(fields ...string) []byte {
+	size := 0
+	for _, f := range fields {
+		size += binary.MaxVarintLen64 + len(f)
+	}
+	buf := make([]byte, 0, size)
+	for _, f := range fields {
+		buf = binary.AppendUvarint(buf, uint64(len(f)))
+		buf = append(buf, f...)
+	}
+	return buf
+}
+
+// decodeIndexField returns the single length-prefixed field that makes up all of b.
+func decodeIndexField(b []byte) (string, bool) {
+	l, n := binary.Uvarint(b)
+	if n <= 0 || l != uint64(len(b[n:])) {
+		return "", false
+	}
+	return string(b[n:]), true
 }
 
 func createIndexKey(indexPrefixKey byte, value []byte, startTime uint64, traceID model.TraceID) []byte {

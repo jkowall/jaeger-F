@@ -1,6 +1,6 @@
 # Badger Storage Record Layouts
 
-* **Status**: Documented existing implementation
+* **Status**: Documented existing implementation; extended 2026-11-23 for length-prefixed operation and tag index keys
 * **Date**: 2026-03-12
 
 ## Context
@@ -34,9 +34,11 @@ A single Badger database instance holds all record types. There is no separate "
 |------------------------|-------------|------------------|
 | Span (primary record)  | `0x80`      | Span store       |
 | Service name index     | `0x81`      | Span store       |
-| Operation name index   | `0x82`      | Span store       |
-| Tag index              | `0x83`      | Span store       |
+| Retired (legacy operation name index) | `0x82` | Not read or written |
+| Retired (legacy tag index) | `0x83`  | Not read or written |
 | Duration index         | `0x84`      | Span store       |
+| Operation name index   | `0x85`      | Span store       |
+| Tag index              | `0x86`      | Span store       |
 | Throughput             | `0x08`      | Sampling store   |
 | Probabilities/QPS      | `0x09`      | Sampling store   |
 
@@ -88,38 +90,40 @@ An index entry is written for each span, keyed by the service name of the span's
 
 ---
 
-### 3. Operation Name Index (`0x82`)
+### 3. Operation Name Index (`0x85`)
 
-An index entry is written for each span, keyed by the concatenation of service name and operation name.
+An index entry is written for each span, keyed by the service name and operation name.
 
 **Key** (variable size):
 ```
-[0x82][serviceName + operationName: variable][startTime: 8B][traceID.High: 8B][traceID.Low: 8B]
+[0x85][len(serviceName): uvarint][serviceName][len(operationName): uvarint][operationName][startTime: 8B][traceID.High: 8B][traceID.Low: 8B]
 ```
 
-- `serviceName + operationName` — the two strings concatenated directly, no separator
+- Each string is preceded by its byte length as an unsigned varint (`binary.AppendUvarint`), so no two distinct (service, operation) pairs produce the same bytes, and the prefix `[0x85][len(serviceName)][serviceName]` matches only keys of that exact service.
 
 **Value**: empty (`nil`)
 
 **Purpose**: enables finding trace IDs for a specific service + operation pair within a time range.
 
-**Note**: because the service name and operation name are concatenated without a separator, a service named `"foo"` with operation `"bar"` produces the same prefix as a service named `"foobar"` with operation `""`. The reader guards against this ambiguity by checking that the full key prefix (up to the timestamp) matches exactly.
+**Legacy layout (`0x82`)**: earlier versions wrote this index under `0x82` with the service name and operation name concatenated without a separator, so service `"ab"` with operation `"c"` and service `"a"` with operation `"bc"` produced the same key and searches for one returned traces of the other. Those keys are no longer read or written and expire with their TTL. After an upgrade, operation searches and the startup operation preload do not see spans written before the upgrade until they age out.
 
 **TTL**: same as the corresponding primary span record.
 
 ---
 
-### 4. Tag Index (`0x83`)
+### 4. Tag Index (`0x86`)
 
 For each searchable tag key-value pair associated with a span, a separate index entry is written. Tags are indexed from three sources: `span.Tags`, `span.Process.Tags`, and `log.Fields` for each log entry.
 
 **Key** (variable size):
 ```
-[0x83][serviceName + tagKey + tagValue: variable][startTime: 8B][traceID.High: 8B][traceID.Low: 8B]
+[0x86][len(serviceName): uvarint][serviceName][len(tagKey): uvarint][tagKey][len(tagValue): uvarint][tagValue][startTime: 8B][traceID.High: 8B][traceID.Low: 8B]
 ```
 
-- `serviceName + tagKey + tagValue` — all three strings concatenated directly, no separators
+- Each string is length-prefixed in the same way as the operation name index.
 - Tag values are converted to their string representation via `kv.AsString()` before being embedded in the key
+
+**Legacy layout (`0x83`)**: earlier versions wrote `serviceName + tagKey + tagValue` concatenated without separators under `0x83`. Those keys are no longer read or written and expire with their TTL.
 
 **Value**: empty (`nil`)
 
@@ -217,7 +221,7 @@ Service names and operation names are not queried directly from Badger on every 
 
 The cache is populated in two ways:
 1. **On write**: `cache.Update(serviceName, operationName, expireTime)` is called after every `WriteSpan`, keeping the cache current without re-scanning Badger.
-2. **On startup** (if `prefillCache=true`): the reader scans all service name index keys (`0x81`) and operation name index keys (`0x82`) to preload any entries persisted from a previous run.
+2. **On startup** (if `prefillCache=true`): the reader scans all service name index keys (`0x81`) and operation name index keys (`0x85`) to preload any entries persisted from a previous run.
 
 Expired entries are lazily removed from the cache when `GetServices` or `GetOperations` is called.
 
@@ -264,7 +268,7 @@ The record layouts described above were chosen to satisfy the following requirem
 
 - **Not distributed**: Badger is a single-node store. It is not suitable for high-throughput or multi-instance deployments.
 - **No spanKind in operations**: the operation name index does not encode span kind, so `GetOperations` returns operations without span kind information (tracked in [issue #1922](https://github.com/jaegertracing/jaeger/issues/1922)).
-- **String concatenation without separators**: the absence of separators between service name, tag key, and tag value in composite index keys means that a suffix of one component can collide with a prefix of the next. The implementation handles this with exact-prefix length checks but it is a latent source of subtle bugs if the key format is extended.
+- **Index key format change**: composite index keys were originally plain concatenations, which let a suffix of one component collide with a prefix of the next. They are now length-prefixed under new prefix bytes (`0x85`, `0x86`); the retired `0x82`/`0x83` keys left by older versions are ignored until they expire.
 - **No dependency index**: the dependency store computes dependency links via a full trace scan on every request rather than maintaining a dedicated index, which may be slow for large datasets.
 - **Sampling entries have no TTL**: throughput and probabilities records are not automatically expired and accumulate indefinitely unless explicitly pruned.
 - **Ephemeral by default**: the default configuration (`Ephemeral: true`) stores data in a temporary directory that is deleted on process exit, which may surprise users who expect data to persist across restarts.
