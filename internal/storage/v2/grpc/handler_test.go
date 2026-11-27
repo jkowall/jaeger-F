@@ -1075,6 +1075,15 @@ func TestHandler_RefusesUnusableFilter(t *testing.T) {
 				return err
 			},
 		},
+		{
+			name:   "FindSpans",
+			method: "FindSpans",
+			call: func(h *Handler) error {
+				return h.FindSpans(&storage.FindSpansRequest{Query: &storage.SpanQueryParameters{
+					Filter: query.Filter,
+				}}, &spanStream{})
+			},
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -1193,7 +1202,10 @@ func TestHandler_FindSpansPreservesQuery(t *testing.T) {
 	query := tracestore.SpanQueryParams{
 		StartTimeMin: time.Unix(10, 0).UTC(),
 		StartTimeMax: time.Unix(20, 0).UTC(),
-		Filter:       &expression.Call{Op: "custom", Args: []expression.Expression{}},
+		Filter: &expression.Call{Op: expression.OpEq, Args: []expression.Expression{
+			&expression.FieldRef{Level: expression.LevelSpan, Name: expression.SpanFieldName},
+			&expression.StringValue{Value: "GET /"},
+		}},
 		OrderBy: []tracestore.SpanSortOrder{
 			{Expression: &expression.AttributeRef{Level: expression.LevelSpan, Key: "priority"}},
 			tracestore.OrderBySpanField("custom", "custom"),
@@ -1208,4 +1220,21 @@ func TestHandler_FindSpansPreservesQuery(t *testing.T) {
 	require.NoError(t, err)
 	reader.AssertExpectations(t)
 	reader.AssertNotCalled(t, "SearchCapabilities", mock.Anything)
+}
+
+// TestHandler_FindSpansRefusesCallAsOperand pins that a span search finalizes its filter the way
+// a trace search does: a call used as a comparison operand is a shape the decoder accepts and
+// only finalization refuses, so it must not reach the reader.
+func TestHandler_FindSpansRefusesCallAsOperand(t *testing.T) {
+	filter := &expressionproto.Call{Op: string(expression.OpEq), Args: []*expressionproto.Expression{
+		{Term: &expressionproto.Expression_Call{Call: &expressionproto.Call{Op: string(expression.OpRegex)}}},
+		{Term: &expressionproto.Expression_Scalar{Scalar: &expressionproto.Scalar{Value: "x"}}},
+	}}
+	reader := new(tracestoremocks.Reader)
+	err := NewHandler(reader, nil, nil).FindSpans(&storage.FindSpansRequest{
+		Query: &storage.SpanQueryParameters{Filter: filter},
+	}, &spanStream{})
+	require.Error(t, err)
+	assert.Equal(t, codes.InvalidArgument, status.Code(err))
+	reader.AssertNotCalled(t, "FindSpans", mock.Anything, mock.Anything)
 }
