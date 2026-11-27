@@ -4,6 +4,7 @@
 package criticalpath
 
 import (
+	"context"
 	"encoding/binary"
 	"testing"
 
@@ -171,7 +172,8 @@ func TestComputeCriticalPath_Internal_SpanNotFound(t *testing.T) {
 	}
 	var spanID pcommon.SpanID = [8]byte{1}
 
-	result := computeCriticalPath(spanMap, spanID, nil, nil)
+	result, err := computeCriticalPath(context.Background(), spanMap, spanID, nil, nil)
+	require.NoError(t, err)
 	assert.Nil(t, result)
 }
 
@@ -193,7 +195,8 @@ func TestComputeCriticalPath_Internal_LastFinishingChild_Recursive(t *testing.T)
 		},
 	}
 
-	result := computeCriticalPath(spanMap, [8]byte{1}, nil, nil)
+	result, err := computeCriticalPath(context.Background(), spanMap, [8]byte{1}, nil, nil)
+	require.NoError(t, err)
 	require.Len(t, result, 3)
 	// 1. span 1: 170-200 (after child ends)
 	// 2. span 2: 120-170
@@ -222,7 +225,8 @@ func TestComputeCriticalPath_ZeroDurationChildAtReturningBoundary(t *testing.T) 
 		},
 	}
 
-	result := computeCriticalPath(spanMap, [8]byte{1}, nil, nil)
+	result, err := computeCriticalPath(context.Background(), spanMap, [8]byte{1}, nil, nil)
+	require.NoError(t, err)
 	require.Equal(t, []Section{
 		{SpanID: "0100000000000000", SectionStart: 150, SectionEnd: 200},
 		{SpanID: "0200000000000000", SectionStart: 100, SectionEnd: 150},
@@ -340,13 +344,63 @@ func TestComputeCriticalPath_DeepChain(t *testing.T) {
 }
 
 func TestFindLastFinishingChildSpan_MissingChild(t *testing.T) {
-	// Test findLastFinishingChildSpan with child ID in list but missing from map (find_lfc.go line 23)
+	// A child ID in the list but missing from the map is skipped.
 	parentSpan := CPSpan{
 		SpanID:       [8]byte{1},
 		ChildSpanIDs: []pcommon.SpanID{[8]byte{2}}, // Refers to missing span
 	}
 	spanMap := map[pcommon.SpanID]CPSpan{} // Empty map
 
-	result := findLastFinishingChildSpan(spanMap, parentSpan, nil)
+	result := newChildCursor(spanMap, parentSpan).lastFinishingChild(nil)
 	assert.Nil(t, result)
+}
+
+func TestComputeCriticalPath_CanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	criticalPath, err := ComputeCriticalPathFromTracesContext(ctx, createTestTrace1())
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Nil(t, criticalPath)
+}
+
+// cancelAfterChecks reports context.Canceled once Err has been called more
+// than allowed times.
+type cancelAfterChecks struct {
+	context.Context
+	allowed int
+	checks  int
+}
+
+func (c *cancelAfterChecks) Err() error {
+	c.checks++
+	if c.checks > c.allowed {
+		return context.Canceled
+	}
+	return nil
+}
+
+func TestComputeCriticalPath_CanceledDuringWalk(t *testing.T) {
+	const children = 4 * ctxCheckInterval
+	root := newSpanID(1)
+	spanMap := map[pcommon.SpanID]CPSpan{
+		root: {SpanID: root, StartTime: 0, Duration: children},
+	}
+	for i := range uint64(children) {
+		id := newSpanID(i + 2)
+		spanMap[id] = CPSpan{SpanID: id, ParentSpanID: root, StartTime: i, Duration: 1}
+		rootSpan := spanMap[root]
+		rootSpan.ChildSpanIDs = append(rootSpan.ChildSpanIDs, id)
+		spanMap[root] = rootSpan
+	}
+
+	ctx := &cancelAfterChecks{Context: context.Background(), allowed: 1}
+	criticalPath, err := computeCriticalPath(ctx, spanMap, root, []Section{}, nil)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Nil(t, criticalPath)
+	assert.Equal(t, 2, ctx.checks)
+
+	criticalPath, err = computeCriticalPath(context.Background(), spanMap, root, []Section{}, nil)
+	require.NoError(t, err)
+	assert.Len(t, criticalPath, children)
 }

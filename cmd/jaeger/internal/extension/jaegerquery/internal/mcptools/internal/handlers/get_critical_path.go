@@ -76,7 +76,7 @@ func (h *getCriticalPathHandler) handle(
 	}
 
 	// Compute critical path
-	criticalPathSections, err := criticalpath.ComputeCriticalPathFromTraces(trace)
+	criticalPathSections, err := criticalpath.ComputeCriticalPathFromTracesContext(ctx, trace)
 	if err != nil {
 		return nil, types.GetCriticalPathOutput{}, fmt.Errorf("failed to compute critical path: %w", err)
 	}

@@ -4,6 +4,7 @@
 package criticalpath
 
 import (
+	"context"
 	"errors"
 
 	"go.opentelemetry.io/collector/pdata/pcommon"
@@ -11,6 +12,9 @@ import (
 
 	"github.com/jaegertracing/jaeger/internal/jptrace"
 )
+
+// ctxCheckInterval is how many walk steps run between checks of the context.
+const ctxCheckInterval = 1024
 
 // Section represents a section of the critical path
 type Section struct {
@@ -28,7 +32,9 @@ type Section struct {
 // The walk terminates because spanMap comes from CreateCPSpanMap, which keeps
 // one span per ID: the spans reachable from spanID form a tree, each span is
 // entered once from its parent, and each return to a parent moves strictly
-// backward in time.
+// backward in time. Each span keeps a childCursor for the whole walk, so the
+// walk takes O(n log n) time for n spans however often it returns to a parent.
+// The walk stops with the context's error once ctx is done.
 //
 // Parameters:
 //   - spanMap: A map associating span IDs with spans, built by CreateCPSpanMap
@@ -37,7 +43,7 @@ type Section struct {
 //   - returningChildStartTime: Optional parameter representing the span's start time.
 //     It is provided only during the recursive return phase.
 //
-// Returns: An array of critical path sections for the trace
+// Returns: An array of critical path sections for the trace, or ctx.Err()
 //
 // Example:
 //
@@ -49,18 +55,31 @@ type Section struct {
 // At this point, it uses returningChildStartTime (startTime of spanC) to select another child that finished
 // immediately before the LFC's start.
 func computeCriticalPath(
+	ctx context.Context,
 	spanMap map[pcommon.SpanID]CPSpan,
 	spanID pcommon.SpanID,
 	criticalPath []Section,
 	returningChildStartTime *uint64,
-) []Section {
-	for {
-		currentSpan, ok := spanMap[spanID]
-		if !ok {
-			return criticalPath
+) ([]Section, error) {
+	cursors := make(map[pcommon.SpanID]*childCursor)
+	for step := 0; ; step++ {
+		if step%ctxCheckInterval == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 		}
 
-		lastFinishingChildSpan := findLastFinishingChildSpan(spanMap, currentSpan, returningChildStartTime)
+		currentSpan, ok := spanMap[spanID]
+		if !ok {
+			return criticalPath, nil
+		}
+
+		cursor, ok := cursors[spanID]
+		if !ok {
+			cursor = newChildCursor(spanMap, currentSpan)
+			cursors[spanID] = cursor
+		}
+		lastFinishingChildSpan := cursor.lastFinishingChild(returningChildStartTime)
 
 		var spanCriticalSection Section
 
@@ -105,7 +124,7 @@ func computeCriticalPath(
 			// walk backwards to one level depth to parent span
 			// provide span's startTime as returningChildStartTime
 			if currentSpan.ParentSpanID.IsEmpty() {
-				return criticalPath
+				return criticalPath, nil
 			}
 			spanID = currentSpan.ParentSpanID
 			returningChildStartTime = &currentSpan.StartTime
@@ -115,6 +134,16 @@ func computeCriticalPath(
 
 // ComputeCriticalPathFromTraces computes the critical path for a given trace
 func ComputeCriticalPathFromTraces(traces ptrace.Traces) ([]Section, error) {
+	return ComputeCriticalPathFromTracesContext(context.Background(), traces)
+}
+
+// ComputeCriticalPathFromTracesContext computes the critical path for a given
+// trace and stops with the context's error once ctx is done.
+func ComputeCriticalPathFromTracesContext(ctx context.Context, traces ptrace.Traces) ([]Section, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	// Create a map of CPSpan objects to avoid modifying the original trace
 	spanMap := CreateCPSpanMap(traces)
 
@@ -140,7 +169,5 @@ func ComputeCriticalPathFromTraces(traces ptrace.Traces) ([]Section, error) {
 	sanitizedSpanMap := removeOverflowingChildren(spanMap)
 	// An empty critical path is a valid result (e.g. a single zero-duration root
 	// span), so start from a non-nil slice and never treat emptiness as an error.
-	criticalPath := computeCriticalPath(sanitizedSpanMap, rootSpanID, []Section{}, nil)
-
-	return criticalPath, nil
+	return computeCriticalPath(ctx, sanitizedSpanMap, rootSpanID, []Section{}, nil)
 }
