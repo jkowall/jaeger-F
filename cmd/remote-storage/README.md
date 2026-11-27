@@ -17,12 +17,14 @@ The file is the only place the service is configured: `--config-file` and `--fea
 #### Configuration File Structure
 
 ```yaml
-# Admin server: health check on /, metrics, /debug/pprof (default :17270)
+# Admin server: health check on /, /version, metrics (default :17270)
 admin:
   endpoint: :17270
   # tls:
   #   cert_file: /path/to/cert.pem
   #   key_file: /path/to/key.pem
+  # Mounts /debug/pprof/ and /debug/vars. Off by default; see Trust boundary.
+  profiling: false
 
 # Logging (defaults shown)
 logging:
@@ -137,6 +139,8 @@ The gRPC port is a trusted interface. `jaeger-remote-storage` and the [`remote_s
 The tenant header is not authentication. When `multi_tenancy` is enabled, the header (default `x-tenant`) identifies the tenant for the call. It does not authenticate the caller. A client that can reach the port and present a tenant name the server accepts is served, including a name listed under `tenants`.
 
 Server TLS is the `grpc.tls` block. Setting `client_ca_file` makes the server require and verify a client certificate. Network policy must admit only the Jaeger processes that use the backend.
+
+The admin port serves the health check, `/version` and metrics. The Go profiling handlers (`/debug/pprof/`) and expvar (`/debug/vars`) expose the command line, goroutine stacks and heap profiles, and a CPU profile occupies the process, so they are mounted only with `admin.profiling: true`. The admin server has no caller authentication, so that setting is rejected unless `admin.endpoint` is a loopback address (such as `localhost:17270`) or `admin.tls` sets `client_ca_file` to require a client certificate.
 
 grpc-go's receive limit applies to every request before decode. It is 4 MiB by default, and it is configurable on this server with `grpc.max_recv_msg_size_mib` (unset means the grpc-go default). It is the only bound applied before decode: the server's codecs (pdata for OTLP, gogo for Jaeger types) do not limit nesting depth while they decode, and the query expression depth limit is checked only after decode. The receive limit bounds payload size. It is not a substitute for mTLS or network policy.
 

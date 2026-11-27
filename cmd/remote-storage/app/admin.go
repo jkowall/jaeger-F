@@ -6,6 +6,7 @@ package app
 import (
 	"context"
 	"errors"
+	"expvar"
 	"fmt"
 	"net"
 	"net/http"
@@ -22,12 +23,14 @@ import (
 	"github.com/jaegertracing/jaeger/internal/version"
 )
 
-// AdminServer runs an HTTP server with admin endpoints, such as /metrics, /debug/pprof, health check, etc.
+// AdminServer runs an HTTP server with admin endpoints: the health check, /version, metrics,
+// and, when profiling is enabled, /debug/pprof and /debug/vars.
 type AdminServer struct {
 	logger    *zap.Logger
 	mux       *http.ServeMux
 	server    *http.Server
 	serverCfg confighttp.ServerConfig
+	profiling bool
 	stopped   sync.WaitGroup
 	hc        *HealthHost
 }
@@ -63,6 +66,7 @@ func (s *AdminServer) configure(cfg AdminServerConfig, logger *zap.Logger) {
 		},
 		TLS: cfg.TLS,
 	}
+	s.profiling = cfg.Profiling
 }
 
 // Handle adds a new handler to the admin server.
@@ -83,9 +87,13 @@ func (s *AdminServer) Serve() error {
 
 func (s *AdminServer) serveWithListener(l net.Listener) (err error) {
 	s.logger.Info("Mounting health check on admin server", zap.String("route", "/"))
-	s.mux.Handle("/", s.hc.Handler())
+	// "/{$}" matches only the root, so a route that is not mounted is a 404 rather than
+	// the health check.
+	s.mux.Handle("/{$}", s.hc.Handler())
 	version.RegisterHandler(s.mux, s.logger)
-	s.registerPprofHandlers()
+	if s.profiling {
+		s.registerProfilingHandlers()
+	}
 	recoveryHandler := recoveryhandler.NewRecoveryHandler(s.logger, true)
 	s.server, err = s.serverCfg.ToServer(
 		context.Background(),
@@ -114,7 +122,9 @@ func (s *AdminServer) serveWithListener(l net.Listener) (err error) {
 	return nil
 }
 
-func (s *AdminServer) registerPprofHandlers() {
+func (s *AdminServer) registerProfilingHandlers() {
+	s.logger.Info("Mounting profiling handlers on admin server", zap.Strings("routes", []string{"/debug/pprof/", "/debug/vars"}))
+	s.mux.Handle("/debug/vars", expvar.Handler())
 	s.mux.HandleFunc("/debug/pprof/", pprof.Index)
 	s.mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
 	s.mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
