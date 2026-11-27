@@ -7,7 +7,6 @@ import (
 	"context"
 	"fmt"
 	"iter"
-	"reflect"
 
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/ptrace"
@@ -49,14 +48,19 @@ func fromInterceptorTraceQuery(q queryinterceptor.TraceQuery, original tracestor
 // chooses the outgoing shape from what the reader declared, and a predicate an interceptor added is
 // held to the same capability check as one the caller sent.
 //
+// The filter the interceptors return is the one dispatched, even when none of them changed it.
+// A legacy query is never sent on in its legacy shape instead, because a backend may evaluate the
+// legacy fields as something other than the equalities the interceptors were shown: Elasticsearch
+// matches a legacy tag value as a regular expression, and over the event level as well. An
+// interceptor that approved an exact lookup would otherwise have approved a pattern search.
+//
 // The nil rule is checked after every hook rather than once at the end, because a predicate one
 // interceptor adds is a restriction the next must not be able to remove: a query that had no
-// filter, gained one, and lost it again would otherwise pass as the untouched legacy query it
-// started as.
+// filter, gained one, and lost it again would otherwise pass as the time-range search it started
+// as.
 func (qs QueryService) onTraceQuery(ctx context.Context, query tracestore.TraceQueryParams) (context.Context, tracestore.TraceQueryParams, error) {
-	queryPreIntercept := toInterceptorTraceQuery(query.ToFilterShape())
-	queryPostIntercept := queryPreIntercept
-	hadPredicates := queryPreIntercept.Filter != nil
+	queryPostIntercept := toInterceptorTraceQuery(query.ToFilterShape())
+	hadPredicates := queryPostIntercept.Filter != nil
 	var err error
 	for _, interceptor := range qs.options.Interceptors {
 		ctx, queryPostIntercept, err = interceptor.OnTraceQuery(ctx, queryPostIntercept)
@@ -68,23 +72,11 @@ func (qs QueryService) onTraceQuery(ctx context.Context, query tracestore.TraceQ
 		}
 		hadPredicates = queryPostIntercept.Filter != nil
 	}
-
-	// A legacy query whose predicates no interceptor touched reaches storage in its legacy shape,
-	// with only the time range updated in case an interceptor narrowed it. Converting it to the
-	// filter shape anyway would change the answer on some backends: Elasticsearch searches a legacy
-	// tag over the event location too, while an unqualified filter reference defaults to span or
-	// resource only (RFC 0005 §5.1). Enabling an interceptor must not move a result set by itself.
-	if query.Filter == nil && reflect.DeepEqual(queryPostIntercept.Filter, queryPreIntercept.Filter) {
-		query.StartTimeMin = queryPostIntercept.StartTimeMin
-		query.StartTimeMax = queryPostIntercept.StartTimeMax
-		return ctx, query, nil
-	}
-
-	// Finalized after that comparison, so finalizing's own rewriting cannot read as a change an
-	// interceptor made.
-	queryPostIntercept.Filter, err = finalizeInterceptorFilter(queryPostIntercept.Filter)
-	if err != nil {
-		return ctx, query, err
+	if queryPostIntercept.Filter != nil {
+		queryPostIntercept.Filter, err = finalizeInterceptorFilter(queryPostIntercept.Filter)
+		if err != nil {
+			return ctx, query, err
+		}
 	}
 	return ctx, fromInterceptorTraceQuery(queryPostIntercept, query), nil
 }

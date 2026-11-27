@@ -546,28 +546,61 @@ func filterCapableBackend() *tracestore.SearchCapabilities {
 	}
 }
 
-// TestFindTraces_LeavesALegacyQueryAloneWhenNothingChangedIt pins that enabling an interceptor does
-// not move a result set by itself. A legacy query is shown to the interceptor as a filter, and an
-// interceptor that returns it unchanged has said nothing about how it should reach storage — so the
-// legacy query is dispatched as it arrived. It matters because a backend may search a legacy
-// attribute more widely than an unqualified filter reference: Elasticsearch reads the legacy tag
-// search over the event location too, while the filter's unqualified default is span-or-resource.
-func TestFindTraces_LeavesALegacyQueryAloneWhenNothingChangedIt(t *testing.T) {
+// TestFindTraces_DispatchesTheFilterTheInterceptorsApproved pins that a legacy query reaches
+// storage as the filter the interceptors were shown, even when none of them changed it. Sending
+// the legacy fields instead would let a backend evaluate something the interceptors never saw:
+// Elasticsearch matches a legacy tag value as a regular expression and over the event level too,
+// while the filter an interceptor approves is an unqualified equality.
+func TestFindTraces_DispatchesTheFilterTheInterceptorsApproved(t *testing.T) {
+	legacyQuery := func() TraceQueryParams {
+		attributes := pcommon.NewMap()
+		attributes.PutStr("http.route", "/cart")
+		return searchQuery(TraceQueryParams{
+			ServiceName: "cart",
+			Attributes:  attributes,
+		})
+	}
+
 	t.Run("an interceptor that changes nothing", func(t *testing.T) {
+		next := &fakeReader{batch: tracesWith("k", "v")}
+		next.capabilities = filterCapableBackend()
+		next.capabilities.Filter.Operators = append(next.capabilities.Filter.Operators, expression.OpAnd)
+		var approved *expression.Call
+		qs := interceptedService(next, fakeInterceptor{
+			onQuery: func(q queryinterceptor.TraceQuery) (queryinterceptor.TraceQuery, error) {
+				approved = q.Filter
+				return q, nil
+			},
+		})
+
+		_, err := collectTraces(qs.FindTraces(t.Context(), legacyQuery()))
+		require.NoError(t, err)
+		require.NotNil(t, approved)
+		assert.Equal(t, approved, next.gotQuery.Filter, "storage runs the filter the interceptor approved")
+		assert.Empty(t, next.gotQuery.ServiceName, "the legacy fields do not travel beside the filter")
+		assert.Zero(t, next.gotQuery.Attributes.Len(), "the legacy fields do not travel beside the filter")
+	})
+
+	t.Run("a reader that evaluates no filter is given the approved filter as legacy fields", func(t *testing.T) {
+		next := &fakeReader{batch: tracesWith("k", "v")}
+		qs := interceptedService(next, fakeInterceptor{})
+
+		_, err := collectTraces(qs.FindTraces(t.Context(), legacyQuery()))
+		require.NoError(t, err)
+		assert.Nil(t, next.gotQuery.Filter)
+		assert.Equal(t, "cart", next.gotQuery.ServiceName)
+		assert.Equal(t, "/cart", next.gotQuery.Attributes.AsRaw()["http.route"])
+	})
+
+	t.Run("a query with no predicates stays without a filter", func(t *testing.T) {
 		next := &fakeReader{batch: tracesWith("k", "v")}
 		next.capabilities = filterCapableBackend()
 		qs := interceptedService(next, fakeInterceptor{})
 
-		attributes := pcommon.NewMap()
-		attributes.PutStr("http.route", "/cart")
-		_, err := collectTraces(qs.FindTraces(t.Context(), searchQuery(TraceQueryParams{
-			ServiceName: "cart",
-			Attributes:  attributes,
-		})))
+		_, err := collectTraces(qs.FindTraces(t.Context(), searchQuery(TraceQueryParams{})))
 		require.NoError(t, err)
-		assert.Nil(t, next.gotQuery.Filter, "storage was given the legacy query it would have had")
-		assert.Equal(t, "cart", next.gotQuery.ServiceName)
-		assert.Equal(t, "/cart", next.gotQuery.Attributes.AsRaw()["http.route"])
+		assert.True(t, next.findCalled)
+		assert.Nil(t, next.gotQuery.Filter)
 	})
 
 	t.Run("an interceptor that narrows the filter", func(t *testing.T) {
@@ -599,8 +632,8 @@ func TestFindTraces_LeavesALegacyQueryAloneWhenNothingChangedIt(t *testing.T) {
 			SearchDepth: 7,
 		})))
 		require.NoError(t, err)
-		assert.Nil(t, next.gotQuery.Filter, "the predicates are still the legacy ones")
-		assert.Equal(t, "cart", next.gotQuery.ServiceName)
+		assert.Equal(t, serviceFilter("cart"), next.gotQuery.Filter, "the predicates are the approved filter")
+		assert.Empty(t, next.gotQuery.ServiceName)
 		assert.Equal(t, narrowedEnd, next.gotQuery.StartTimeMax, "the envelope change survives")
 		assert.EqualValues(t, 7, next.gotQuery.SearchDepth, "the result bound is not the interceptor's to change")
 	})
