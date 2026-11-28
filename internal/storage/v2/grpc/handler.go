@@ -364,10 +364,14 @@ func (*Handler) toTraceQueryParams(t *storage.TraceQueryParameters) (tracestore.
 		return tracestore.TraceQueryParams{}, status.Errorf(codes.InvalidArgument, "SearchDepth must be in [0, %d]", tracestore.MaxSearchDepth)
 	}
 	searchDepth := uint32(depth)
+	attributes, err := convertKeyValueListToMap(t.Attributes)
+	if err != nil {
+		return tracestore.TraceQueryParams{}, err
+	}
 	query := tracestore.TraceQueryParams{
 		ServiceName:   t.ServiceName,
 		OperationName: t.OperationName,
-		Attributes:    convertKeyValueListToMap(t.Attributes),
+		Attributes:    attributes,
 		StartTimeMin:  t.StartTimeMin,
 		StartTimeMax:  t.StartTimeMax,
 		DurationMin:   t.DurationMin,
@@ -387,18 +391,29 @@ func (*Handler) toTraceQueryParams(t *storage.TraceQueryParameters) (tracestore.
 	return query, nil
 }
 
-func convertKeyValueListToMap(kvList []*storage.KeyValue) pcommon.Map {
+// maxAttributeNesting is how many array and key-value-list values an attribute value may nest
+// inside one another. The conversion recurses once per level, so it refuses a deeper value
+// rather than walk it.
+const maxAttributeNesting = 32
+
+var errAttributeNestedTooDeeply = status.Errorf(codes.InvalidArgument, "attribute value nests more than %d arrays or key-value lists", maxAttributeNesting)
+
+func convertKeyValueListToMap(kvList []*storage.KeyValue) (pcommon.Map, error) {
 	m := pcommon.NewMap()
 	for _, kv := range kvList {
 		if kv == nil || kv.Value == nil {
 			continue
 		}
-		setValueToMap(m, kv.Key, kv.Value)
+		if err := setValueToMap(m, kv.Key, kv.Value, 0); err != nil {
+			return pcommon.Map{}, err
+		}
 	}
-	return m
+	return m, nil
 }
 
-func setValueToMap(m pcommon.Map, key string, av *storage.AnyValue) {
+// setValueToMap and setValueToSlice convert av, which is nested inside depth arrays and
+// key-value lists of the attribute it belongs to.
+func setValueToMap(m pcommon.Map, key string, av *storage.AnyValue, depth int) error {
 	switch v := av.Value.(type) {
 	case *storage.AnyValue_StringValue:
 		m.PutStr(key, v.StringValue)
@@ -411,28 +426,39 @@ func setValueToMap(m pcommon.Map, key string, av *storage.AnyValue) {
 	case *storage.AnyValue_BytesValue:
 		m.PutEmptyBytes(key).FromRaw(v.BytesValue)
 	case *storage.AnyValue_ArrayValue:
+		if depth >= maxAttributeNesting {
+			return errAttributeNestedTooDeeply
+		}
 		sliceVal := m.PutEmptySlice(key)
 		for _, elem := range v.ArrayValue.Values {
 			if elem == nil {
 				sliceVal.AppendEmpty()
 				continue
 			}
-			setValueToSlice(sliceVal, elem)
+			if err := setValueToSlice(sliceVal, elem, depth+1); err != nil {
+				return err
+			}
 		}
 	case *storage.AnyValue_KvlistValue:
+		if depth >= maxAttributeNesting {
+			return errAttributeNestedTooDeeply
+		}
 		mapVal := m.PutEmptyMap(key)
 		for _, kv := range v.KvlistValue.Values {
 			if kv == nil || kv.Value == nil {
 				continue
 			}
-			setValueToMap(mapVal, kv.Key, kv.Value)
+			if err := setValueToMap(mapVal, kv.Key, kv.Value, depth+1); err != nil {
+				return err
+			}
 		}
 	default:
-		return // unreachable
+		return nil // unreachable
 	}
+	return nil
 }
 
-func setValueToSlice(slice pcommon.Slice, av *storage.AnyValue) {
+func setValueToSlice(slice pcommon.Slice, av *storage.AnyValue, depth int) error {
 	switch v := av.Value.(type) {
 	case *storage.AnyValue_StringValue:
 		slice.AppendEmpty().SetStr(v.StringValue)
@@ -445,23 +471,34 @@ func setValueToSlice(slice pcommon.Slice, av *storage.AnyValue) {
 	case *storage.AnyValue_BytesValue:
 		slice.AppendEmpty().SetEmptyBytes().FromRaw(v.BytesValue)
 	case *storage.AnyValue_ArrayValue:
+		if depth >= maxAttributeNesting {
+			return errAttributeNestedTooDeeply
+		}
 		newSlice := slice.AppendEmpty().SetEmptySlice()
 		for _, subElem := range v.ArrayValue.Values {
 			if subElem == nil {
 				newSlice.AppendEmpty()
 				continue
 			}
-			setValueToSlice(newSlice, subElem)
+			if err := setValueToSlice(newSlice, subElem, depth+1); err != nil {
+				return err
+			}
 		}
 	case *storage.AnyValue_KvlistValue:
+		if depth >= maxAttributeNesting {
+			return errAttributeNestedTooDeeply
+		}
 		newMap := slice.AppendEmpty().SetEmptyMap()
 		for _, kv := range v.KvlistValue.Values {
 			if kv == nil || kv.Value == nil {
 				continue
 			}
-			setValueToMap(newMap, kv.Key, kv.Value)
+			if err := setValueToMap(newMap, kv.Key, kv.Value, depth+1); err != nil {
+				return err
+			}
 		}
 	default:
-		return // unreachable
+		return nil // unreachable
 	}
+	return nil
 }
