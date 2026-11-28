@@ -62,9 +62,8 @@ func (h *readSkillHandler) handle(
 	maxSize := int(h.maxFileSize)
 	cut := min(n, maxSize)
 	// Skill files are arbitrary UTF-8 text, so a cut exactly at maxSize can land
-	// inside a multi-byte rune. Back off to the start of that rune, if any, the
-	// same way truncateForSpan does in the mcptools package, so truncation never
-	// serves invalid UTF-8.
+	// inside a multi-byte rune. Back off to the start of that rune, if any, so
+	// truncation never serves invalid UTF-8.
 	for cut > 0 && !utf8.RuneStart(buf[cut]) {
 		cut--
 	}

@@ -7,10 +7,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"strings"
 	"testing"
 	"time"
-	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -157,130 +155,57 @@ func TestTracingMiddlewareToolCallSuccess(t *testing.T) {
 	assert.Equal(t, codes.Unset, spanData.Status.Code)
 }
 
-func TestTracingMiddlewareRecordsArgumentsAndResult(t *testing.T) {
-	capture := newTraceCapture(t)
-	middleware := chainMiddleware(createTracingMiddleware(capture.provider))
-
-	wrapped := middleware(func(_ context.Context, _ string, _ mcp.Request) (mcp.Result, error) {
-		return &mcp.CallToolResult{
-			Content: []mcp.Content{&mcp.TextContent{Text: "3 services found"}},
-		}, nil
-	})
-
-	req := newToolCallRequestWithArguments("find_traces", `{"sql":"SELECT DISTINCT trace_id FROM spans"}`)
-	result, err := wrapped(context.Background(), mcpMethodToolsCall, req)
-	require.NoError(t, err)
-	require.NotNil(t, result)
-
-	spanData := capture.singleSpan(t)
-	assertHasStringAttribute(t, spanData.Attributes, string(otelsemconv.GenAIToolCallArguments("").Key), `{"sql":"SELECT DISTINCT trace_id FROM spans"}`)
-
-	resultAttr := findAttribute(t, spanData.Attributes, string(otelsemconv.GenAIToolCallResult("").Key))
-	assert.Contains(t, resultAttr.Value.AsString(), "3 services found")
-}
-
-func TestTracingMiddlewareOmitsArgumentsWhenEmpty(t *testing.T) {
-	capture := newTraceCapture(t)
-	middleware := chainMiddleware(createTracingMiddleware(capture.provider))
-
-	wrapped := middleware(func(_ context.Context, _ string, _ mcp.Request) (mcp.Result, error) {
-		return &mcp.CallToolResult{}, nil
-	})
-
-	_, err := wrapped(context.Background(), mcpMethodToolsCall, newToolCallRequest("get_services"))
-	require.NoError(t, err)
-
-	spanData := capture.singleSpan(t)
-	assertMissingAttribute(t, spanData.Attributes, string(otelsemconv.GenAIToolCallArguments("").Key))
-}
-
-func TestTracingMiddlewareTruncatesOversizedResult(t *testing.T) {
-	capture := newTraceCapture(t)
-	middleware := chainMiddleware(createTracingMiddleware(capture.provider))
-
-	huge := string(make([]byte, maxSpanAttrChars*2))
-	wrapped := middleware(func(_ context.Context, _ string, _ mcp.Request) (mcp.Result, error) {
-		return &mcp.CallToolResult{
-			Content: []mcp.Content{&mcp.TextContent{Text: huge}},
-		}, nil
-	})
-
-	_, err := wrapped(context.Background(), mcpMethodToolsCall, newToolCallRequest("find_traces"))
-	require.NoError(t, err)
-
-	spanData := capture.singleSpan(t)
-	resultAttr := findAttribute(t, spanData.Attributes, string(otelsemconv.GenAIToolCallResult("").Key))
-	got := resultAttr.Value.AsString()
-	assert.LessOrEqual(t, len(got), maxSpanAttrChars)
-	assert.True(t, strings.HasPrefix(got, "(truncated from "),
-		"marker must lead the exported value, got %q", got[:min(40, len(got))])
-	assert.True(t, utf8.ValidString(got), "exported attribute must be valid UTF-8")
-}
-
-func TestToolResultText(t *testing.T) {
-	assert.Empty(t, toolResultText(nil))
-
-	text := toolResultText(&mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "ok"}}})
-	assert.Contains(t, text, "ok")
-}
-
-func TestToolResultTextMarshalFailureFallsBackToGoSyntax(t *testing.T) {
-	// StructuredContent holding a channel cannot be JSON-marshaled; exercises
-	// the defensive fallback path.
-	result := &mcp.CallToolResult{StructuredContent: make(chan int)}
-	text := toolResultText(result)
-	assert.NotEmpty(t, text)
-	assert.NotContains(t, text, `"content"`)
-}
-
-func TestTruncateForSpan(t *testing.T) {
-	short := "hello"
-	assert.Equal(t, short, truncateForSpan(short, maxSpanAttrChars))
-
-	long := string(make([]byte, maxSpanAttrChars+100))
-	truncated := truncateForSpan(long, maxSpanAttrChars)
-	assert.LessOrEqual(t, len(truncated), maxSpanAttrChars)
-	// The marker leads, so it survives a UI that clips the value, and the
-	// value no longer opens with "{" for a UI that would try to parse it.
-	assert.True(t, strings.HasPrefix(truncated, "(truncated from "),
-		"marker must lead the value, got %q", truncated[:min(40, len(truncated))])
-}
-
-func TestTruncateForSpanMaxCharsSmallerThanMarker(t *testing.T) {
-	long := string(make([]byte, 1000))
-	truncated := truncateForSpan(long, 10)
-	assert.Len(t, truncated, 10)
-	assert.True(t, utf8.ValidString(truncated))
-}
-
-// A multi-byte rune straddling the cut must not be split: protobuf string
-// fields must hold valid UTF-8, and the Go marshaler rejects anything else,
-// which would fail the OTLP export of every span in the same batch.
-func TestTruncateForSpanCutsOnRuneBoundary(t *testing.T) {
-	// "€" is three bytes, so a cut can land inside it at one of two offsets.
-	// Sweep the cap so the boundary falls at each position in turn.
-	body := strings.Repeat("€", 200)
-	for maxChars := len("(truncated from 600) ") + 1; maxChars <= len("(truncated from 600) ")+9; maxChars++ {
-		truncated := truncateForSpan(body, maxChars)
-		assert.True(t, utf8.ValidString(truncated),
-			"maxChars=%d produced invalid UTF-8: %q", maxChars, truncated)
-		assert.LessOrEqual(t, len(truncated), maxChars, "maxChars=%d exceeded cap", maxChars)
+// A tool's arguments, its result and its error messages hold trace data and
+// search literals the caller was allowed to see. The span is exported where
+// other callers can read it, so none of that text may reach the span.
+func TestTracingMiddlewareRecordsNoRequestOrResultText(t *testing.T) {
+	const literal = "placeholder-literal"
+	tests := []struct {
+		name    string
+		handler mcp.MethodHandler
+	}{
+		{
+			name: "result",
+			handler: func(context.Context, string, mcp.Request) (mcp.Result, error) {
+				return &mcp.CallToolResult{
+					Content:           []mcp.Content{&mcp.TextContent{Text: literal}},
+					StructuredContent: map[string]any{"attributes": map[string]any{"prompt": literal}},
+				}, nil
+			},
+		},
+		{
+			name: "error result",
+			handler: func(context.Context, string, mcp.Request) (mcp.Result, error) {
+				result := &mcp.CallToolResult{}
+				result.SetError(errors.New(`invalid sql: "` + literal + `" is not a decimal number`))
+				return result, nil
+			},
+		},
+		{
+			name: "error",
+			handler: func(context.Context, string, mcp.Request) (mcp.Result, error) {
+				return nil, &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: "invalid arguments: " + literal}
+			},
+		},
 	}
-}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			capture := newTraceCapture(t)
+			wrapped := chainMiddleware(createTracingMiddleware(capture.provider))(test.handler)
 
-func TestToolArgumentsFromRequest(t *testing.T) {
-	req := newToolCallRequestWithArguments("find_traces", `{"a":1}`)
-	assert.Equal(t, `{"a":1}`, toolArgumentsFromRequest(mcpMethodToolsCall, req))
-	assert.Empty(t, toolArgumentsFromRequest("initialize", req))
-	assert.Empty(t, toolArgumentsFromRequest(mcpMethodToolsCall, nil))
-	assert.Empty(t, toolArgumentsFromRequest(mcpMethodToolsCall, newToolCallRequest("find_traces")))
-}
+			req := newToolCallRequestWithArguments("find_spans", `{"sql":"SELECT * FROM spans s WHERE s.attributes['prompt'] = '`+literal+`'"}`)
+			_, _ = wrapped(context.Background(), mcpMethodToolsCall, req)
 
-func TestToolArgumentsFromRequestWrongParams(t *testing.T) {
-	req := &mcp.ServerRequest[*mcp.InitializeParams]{
-		Params: &mcp.InitializeParams{ProtocolVersion: "2025-03-26"},
+			spanData := capture.singleSpan(t)
+			assertHasStringAttribute(t, spanData.Attributes, string(otelsemconv.GenAIToolName("").Key), "find_spans")
+			assertMissingAttribute(t, spanData.Attributes, string(otelsemconv.GenAIToolCallArguments("").Key))
+			assertMissingAttribute(t, spanData.Attributes, string(otelsemconv.GenAIToolCallResult("").Key))
+			assert.Empty(t, spanData.Events)
+			encoded, err := json.Marshal(spanData)
+			require.NoError(t, err)
+			assert.NotContains(t, string(encoded), literal)
+		})
 	}
-	assert.Empty(t, toolArgumentsFromRequest(mcpMethodToolsCall, req))
 }
 
 func TestTracingMiddlewareToolCallError(t *testing.T) {
@@ -300,7 +225,7 @@ func TestTracingMiddlewareToolCallError(t *testing.T) {
 	assertHasStringAttribute(t, spanData.Attributes, string(otelsemconv.GenAIToolName("").Key), "get_trace_topology")
 	assertHasStringAttribute(t, spanData.Attributes, string(otelsemconv.GenAIOperationNameExecuteTool.Key), "execute_tool")
 	assert.Equal(t, codes.Error, spanData.Status.Code)
-	assert.Equal(t, expectedErr.Error(), spanData.Status.Description)
+	assert.Equal(t, spanStatusMethodError, spanData.Status.Description)
 }
 
 func TestTracingMiddlewareToolCallGenericError(t *testing.T) {
@@ -320,7 +245,7 @@ func TestTracingMiddlewareToolCallGenericError(t *testing.T) {
 	assertHasStringAttribute(t, spanData.Attributes, string(otelsemconv.GenAIToolName("").Key), "find_traces")
 	assertHasStringAttribute(t, spanData.Attributes, string(otelsemconv.GenAIOperationNameExecuteTool.Key), "execute_tool")
 	assert.Equal(t, codes.Error, spanData.Status.Code)
-	assert.Equal(t, expectedErr.Error(), spanData.Status.Description)
+	assert.Equal(t, spanStatusMethodError, spanData.Status.Description)
 }
 
 func TestTracingMiddlewareToolCallResultError(t *testing.T) {
@@ -343,7 +268,7 @@ func TestTracingMiddlewareToolCallResultError(t *testing.T) {
 	assertHasStringAttribute(t, spanData.Attributes, string(otelsemconv.GenAIOperationNameExecuteTool.Key), "execute_tool")
 	assertHasStringAttribute(t, spanData.Attributes, string(otelsemconv.ErrorType("").Key), errorTypeTool)
 	assert.Equal(t, codes.Error, spanData.Status.Code)
-	assert.Equal(t, "invalid pattern", spanData.Status.Description)
+	assert.Equal(t, spanStatusToolError, spanData.Status.Description)
 }
 
 func TestTracingMiddlewareTracesNonToolMethods(t *testing.T) {
@@ -379,7 +304,7 @@ func TestTracingMiddlewareNonToolMethodError(t *testing.T) {
 	assert.Equal(t, "initialize", spanData.Name)
 	assertHasStringAttribute(t, spanData.Attributes, string(otelsemconv.McpMethodName("").Key), "initialize")
 	assert.Equal(t, codes.Error, spanData.Status.Code)
-	assert.Equal(t, expectedErr.Error(), spanData.Status.Description)
+	assert.Equal(t, spanStatusMethodError, spanData.Status.Description)
 }
 
 func TestTracingMiddlewareCreatesChildSpanWhenParentExists(t *testing.T) {
@@ -431,7 +356,7 @@ func TestTracingMiddlewareToolCallResultErrorWithoutConcreteError(t *testing.T) 
 	assertHasStringAttribute(t, spanData.Attributes, string(otelsemconv.GenAIOperationNameExecuteTool.Key), "execute_tool")
 	assertHasStringAttribute(t, spanData.Attributes, string(otelsemconv.ErrorType("").Key), errorTypeTool)
 	assert.Equal(t, codes.Error, spanData.Status.Code)
-	assert.Equal(t, "tool returned an error result", spanData.Status.Description)
+	assert.Equal(t, spanStatusToolError, spanData.Status.Description)
 }
 
 func TestTracingMiddlewareUsesTraceContextFromRequestMeta(t *testing.T) {
@@ -574,17 +499,6 @@ func newToolCallRequestWithArguments(toolName, argumentsJSON string) *mcp.Server
 			Arguments: json.RawMessage(argumentsJSON),
 		},
 	}
-}
-
-func findAttribute(t *testing.T, attrs []attribute.KeyValue, key string) attribute.KeyValue {
-	t.Helper()
-	for _, attr := range attrs {
-		if string(attr.Key) == key {
-			return attr
-		}
-	}
-	t.Fatalf("attribute %s not found in %+v", key, attrs)
-	return attribute.KeyValue{}
 }
 
 func assertMissingAttribute(t *testing.T, attrs []attribute.KeyValue, key string) {
