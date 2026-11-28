@@ -1,0 +1,56 @@
+# Copyright (c) 2026 The Jaeger Authors.
+# SPDX-License-Identifier: Apache-2.0
+
+# Test fixture: the shipped query-interceptor example, plus the MCP endpoint the
+# default all-in-one config enables (ai.mcp). enable_tracing is left unset so
+# jaeger_query keeps its v2 default (on). Self-traces are exported by jtracer
+# to OTEL_EXPORTER_OTLP_ENDPOINT, which the test points at this file's OTLP
+# receiver.
+service:
+  extensions: [jaeger_storage, jaeger_query, query_interceptor_example]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      exporters: [jaeger_storage_exporter]
+  telemetry:
+    metrics:
+      level: none
+
+extensions:
+  query_interceptor_example:
+    identity_header: x-jaeger-caller-role
+    privileged_roles: [admin]
+    deny_query_attributes: [prompt]
+    redact_attributes: [prompt, llm.response]
+
+  jaeger_query:
+    storage:
+      traces: some_store
+    query_interceptors: [query_interceptor_example]
+    http:
+      endpoint: "${env:JAEGER_QUERY_HTTP_ENDPOINT:-0.0.0.0:16686}"
+      include_metadata: true
+    grpc:
+      endpoint: "${env:JAEGER_QUERY_GRPC_ENDPOINT:-0.0.0.0:16685}"
+    ai:
+      # No chat sidecar in this test. The health checker has nothing to dial.
+      health_check_interval: 0
+      mcp: {}
+
+  jaeger_storage:
+    backends:
+      some_store:
+        memory:
+          max_traces: 100000
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: "${env:OTLP_GRPC_ENDPOINT:-localhost:4317}"
+      http:
+        endpoint: "${env:OTLP_HTTP_ENDPOINT:-localhost:4318}"
+
+exporters:
+  jaeger_storage_exporter:
+    trace_storage: some_store
