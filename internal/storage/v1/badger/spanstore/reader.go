@@ -53,6 +53,10 @@ const (
 	defaultNumTraces = 100
 	sizeOfTraceID    = 16
 	encodingTypeBits = 0x0F
+
+	// maxRangeIndexSkips is how many consecutive out-of-window keys with the same
+	// index value scanRangeIndex steps over before seeking past the rest of them.
+	maxRangeIndexSkips = 16
 )
 
 // TraceReader reads traces from the local badger store
@@ -576,9 +580,17 @@ func scanFunction(it *badger.Iterator, indexPrefix []byte, timeBytesEnd []byte) 
 	return false
 }
 
-// scanRangeIndex scans the time range for index keys matching the given prefix.
+// scanRangeIndex scans the time range for index keys whose fixed-length index value
+// is between indexStartValue and indexEndValue (both include the index prefix byte).
+//
+// Keys are ordered by index value first and start time second, so keys outside the
+// time window are interleaved with matching ones across the whole value range. Only
+// keys inside [plan.startTimeMin, plan.startTimeMax] are returned, and runs of keys
+// outside the window for one index value are skipped with a seek instead of being walked.
 func (r *TraceReader) scanRangeIndex(plan *executionPlan, indexStartValue []byte, indexEndValue []byte) ([][]byte, error) {
 	indexResults := make([][]byte, 0)
+	valueLen := len(indexStartValue)
+	keyLen := valueLen + 8 + sizeOfTraceID
 
 	err := r.store.View(func(txn *badger.Txn) error {
 		opts := badger.DefaultIteratorOptions
@@ -586,27 +598,74 @@ func (r *TraceReader) scanRangeIndex(plan *executionPlan, indexStartValue []byte
 		it := txn.NewIterator(opts)
 		defer it.Close()
 
-		// Create starting point for sorted index scan
-		startIndex := make([]byte, len(indexStartValue)+len(plan.startTimeMin))
-		copy(startIndex, indexStartValue)
-		copy(startIndex[len(indexStartValue):], plan.startTimeMin)
+		seekKey := make([]byte, valueLen+len(plan.startTimeMin))
+		copy(seekKey, indexStartValue)
+		copy(seekKey[valueLen:], plan.startTimeMin)
 
-		for it.Seek(startIndex); scanRangeFunction(it, indexEndValue); it.Next() {
-			item := it.Item()
+		// Out-of-window keys of one index value are stepped over with Next until
+		// maxRangeIndexSkips of them are seen, then the rest of the run is skipped with
+		// a seek. Seeks allocate, so they are reserved for long runs.
+		skippedValue := make([]byte, 0, valueLen)
+		skipped := 0
+		skip := func(value []byte, nextValue bool) bool {
+			if !bytes.Equal(skippedValue, value) {
+				skippedValue = append(skippedValue[:0], value...)
+				skipped = 0
+			}
+			if skipped < maxRangeIndexSkips {
+				skipped++
+				it.Next()
+				return true
+			}
+			copy(seekKey, value)
+			if nextValue && !incrementIndexValue(seekKey[1:valueLen]) {
+				return false
+			}
+			copy(seekKey[valueLen:], plan.startTimeMin)
+			it.Seek(seekKey)
+			return true
+		}
 
-			// ScanFunction is a prefix scanning (since we could have for example service1 & service12)
-			// Now we need to match only the exact key if we want to add it
-			timestampStartIndex := len(it.Item().Key()) - (sizeOfTraceID + 8) // timestamp is stored with 8 bytes
-			timestamp := it.Item().Key()[timestampStartIndex : timestampStartIndex+8]
-			if bytes.Compare(timestamp, plan.startTimeMax) <= 0 {
-				key := make([]byte, len(item.Key()))
-				copy(key, item.Key())
-				indexResults = append(indexResults, key)
+		for it.Seek(seekKey); scanRangeFunction(it, indexEndValue); {
+			key := it.Item().Key()
+			if len(key) != keyLen {
+				return nil
+			}
+			value := key[:valueLen]
+			timestamp := key[valueLen : valueLen+8]
+			switch {
+			case bytes.Compare(timestamp, plan.startTimeMin) < 0:
+				// Seek to the window start within the same index value.
+				if !skip(value, false) {
+					return nil
+				}
+			case bytes.Compare(timestamp, plan.startTimeMax) > 0:
+				// The rest of this index value is after the window; seek to the next value.
+				if !skip(value, true) {
+					return nil
+				}
+			default:
+				keyCopy := make([]byte, len(key))
+				copy(keyCopy, key)
+				indexResults = append(indexResults, keyCopy)
+				it.Next()
 			}
 		}
 		return nil
 	})
 	return indexResults, err
+}
+
+// incrementIndexValue increments a big-endian value in place and reports false
+// if it overflowed, meaning there is no next value.
+func incrementIndexValue(value []byte) bool {
+	for i := len(value) - 1; i >= 0; i-- {
+		value[i]++
+		if value[i] != 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // scanRangeFunction seeks until the index end has been reached
